@@ -1,0 +1,21 @@
+# Compiled binaries
+/icmpchat
+/cmd/icmpchat/icmpchat
+/cmd/relay/relay
+*.exe
+*.exe~
+*.dylib
+*.so
+*.dll
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# Editor / OS
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
