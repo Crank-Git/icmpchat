@@ -91,3 +91,35 @@ func TestSenderLoopback(t *testing.T) {
 		t.Fatalf("reply data = %q, want %q", e.Data, second)
 	}
 }
+
+// TestSendPollLoopback verifies SendPoll writes a poll to loopback without
+// root and without consuming a reply (it is write-only, so a poll never
+// swallows a delivery). The poll carries exactly the poll header the relay
+// expects to recognize.
+func TestSendPollLoopback(t *testing.T) {
+	s, err := NewSender("127.0.0.1")
+	if err != nil {
+		if isICMPPermissionErr(err) {
+			t.Skipf("ICMP sender socket unavailable: %v", err)
+		}
+		t.Fatalf("NewSender: %v", err)
+	}
+	defer s.Close()
+
+	if s.raw {
+		t.Skip("raw sender fallback; covered by the e2e binary test")
+	}
+
+	pollPayload, err := BuildPollHeader("demo")
+	if err != nil {
+		t.Fatalf("BuildPollHeader: %v", err)
+	}
+	// A poll must be exactly the relay header: magic, ver, relay|poll flags,
+	// room length, and room bytes -- nothing trailing.
+	if got, want := len(pollPayload), RelayHeaderLen("demo"); got != want {
+		t.Fatalf("poll length = %d, want %d", got, want)
+	}
+	if !s.SendPoll(pollPayload) {
+		t.Fatalf("SendPoll failed to write poll to loopback")
+	}
+}

@@ -66,6 +66,18 @@ func main() {
 	}
 	go inputLoop(lines)
 
+	// In relay mode, poll the relay every second. A poll is a keepalive that
+	// joins the room and asks the relay to drain any messages queued since the
+	// last poll as an echo reply. This is how clients that cannot receive echo
+	// requests (such as macOS) learn of queued messages.
+	if *relay != "" {
+		pollPayload, err := icmpchat.BuildPollHeader(relayRoom)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cannot build poll header: %v\n", err)
+			os.Exit(1)
+		}
+		go pollLoop(sender, pollPayload)
+	}
 	if *relay != "" {
 		fmt.Printf("icmpchat: chatting as %q via relay %s, room %q\n", *name, *relay, relayRoom)
 	} else {
@@ -95,6 +107,30 @@ func main() {
 				continue
 			}
 			sendLine(line, *name, key, sender, *relay, relayRoom, overhead)
+		}
+	}
+}
+
+// pollInterval is how often a relay client polls the relay. Each poll is a
+// keepalive that joins the room and drains queued messages.
+const pollInterval = time.Second
+
+// pollLoop sends a keepalive poll to the relay every pollInterval. It drives
+// pull-based delivery: the relay queues messages for a member and hands them
+// out as echo replies on the member's next poll, which is how clients that
+// cannot receive echo requests (such as macOS) get their messages.
+func pollLoop(sender *icmpchat.Sender, pollPayload []byte) {
+	// Poll immediately so the room joins without waiting for the first tick, then
+	// keep polling to stay registered and drain queued messages.
+	if !sender.SendPoll(pollPayload) {
+		// The initial poll failed; the ticker retries.
+	}
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if !sender.SendPoll(pollPayload) {
+			// A failed poll just means the relay is unreachable; the next tick
+			// retries. There is nothing else to do.
 		}
 	}
 }

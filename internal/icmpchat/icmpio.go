@@ -95,6 +95,32 @@ func (s *Sender) Send(payload []byte) bool {
 	return false
 }
 
+// SendPoll writes one echo request carrying a poll header to the relay without
+// waiting for a reply. A poll is a keepalive: it joins the room and asks the
+// relay to drain any messages queued since the last poll as an echo reply.
+// Writing only (never reading) keeps the poll off the receive path, so it can
+// not swallow a delivery. The kernel's auto-ack of the poll is harmless because
+// the listener ignores replies without the deliver bit.
+func (s *Sender) SendPoll(payload []byte) bool {
+	msg := icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{Seq: nextSeq(), Data: payload},
+	}
+	b, err := msg.Marshal(nil)
+	if err != nil {
+		return false
+	}
+	var addr net.Addr
+	if s.raw {
+		addr = s.dst
+	} else {
+		addr = s.peer
+	}
+	_, err = s.conn.WriteTo(b, addr)
+	return err == nil
+}
+
 // SendRaw writes one echo request to ip without waiting for a reply. The relay
 // uses it to forward messages to many members quickly; delivery acks come
 // separately from each member's kernel auto-reply.
