@@ -8,7 +8,7 @@ on:
 
 # Cancel in-flight runs for the same branch when a new commit is pushed.
 concurrency:
-  group: ci-${{ git.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
