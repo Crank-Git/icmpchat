@@ -190,44 +190,59 @@ func TestParseEchoRequestRejectsEchoReplies(t *testing.T) {
 	}
 }
 
-// TestHandleRelayMessageAccepted is a regression test for a bug where
+// TestHandleRelayDeliverAccepted is a regression test for a bug where
 // handlePacket dropped every relay-forwarded message: in relay mode l.peer is
 // empty, so the old `src != l.peer` check rejected all packets. Only the relay
-// (l.relay) should be accepted in this mode.
-func TestHandleRelayMessageAccepted(t *testing.T) {
+// (l.relay) should be accepted in this mode, and only as an echo reply (type 0)
+// carrying the deliver bit.
+func TestHandleRelayDeliverAccepted(t *testing.T) {
 	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
 	chat := &Message{Name: "mac", Text: "hb2", MsgID: 3, ChunkIdx: 0, ChunkCnt: 1}
 	chatPayload, _ := Encode(chat, nil)
-	header, _ := BuildRelayHeader("demo")
+	header, _ := BuildDeliverHeader("demo")
 	wire := make([]byte, 0, len(header)+len(chatPayload))
 	wire = append(wire, header...)
 	wire = append(wire, chatPayload...)
-	pkt := echoRequestPacket(wire)
+	// Deliveries arrive as echo replies (type 0), not echo requests.
+	pkt := echoReplyPacket(wire)
 	name, text, complete, dropped, err := l.handlePacket(net.ParseIP("192.168.1.215"), pkt)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if dropped || !complete || name != "mac" || text != "hb2" {
-		t.Fatalf("relay message dropped or wrong: name=%q text=%q complete=%v dropped=%v", name, text, complete, dropped)
+		t.Fatalf("relay deliver dropped or wrong: name=%q text=%q complete=%v dropped=%v", name, text, complete, dropped)
 	}
 }
 
 // TestHandleRelayWrongSourceDropped ensures a relay-mode listener still drops
-// packets that do not arrive from the relay.
+// deliveries that do not arrive from the relay.
 func TestHandleRelayWrongSourceDropped(t *testing.T) {
 	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
 	chat := &Message{Name: "eve", Text: "spoof", MsgID: 4, ChunkIdx: 0, ChunkCnt: 1}
 	chatPayload, _ := Encode(chat, nil)
-	header, _ := BuildRelayHeader("demo")
+	header, _ := BuildDeliverHeader("demo")
 	wire := make([]byte, 0, len(header)+len(chatPayload))
 	wire = append(wire, header...)
 	wire = append(wire, chatPayload...)
-	pkt := echoRequestPacket(wire)
+	pkt := echoReplyPacket(wire)
 	_, _, _, dropped, err := l.handlePacket(net.ParseIP("10.0.0.9"), pkt)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if !dropped {
-		t.Fatalf("packet from non-relay source should be dropped in relay mode")
+		t.Fatalf("deliver from non-relay source should be dropped in relay mode")
+	}
+}
+
+// TestHandleRelayReplyWithoutDeliverFlagDropped ensures a relay-mode listener
+// ignores echo replies that carry no deliver bit. The relay's own echo-back of
+// our polls and messages (and the kernel's auto-ack) are replies from the relay
+// with no deliver bit, so accepting them would inject garbage into reassembly.
+func TestHandleRelayReplyWithoutDeliverFlagDropped(t *testing.T) {
+	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
+	pkt := echoReplyPacket([]byte("ICHT\x01\x00\x00\x00\x00\x00\x00\x00x"))
+	_, _, complete, dropped, _ := l.handlePacket(net.ParseIP("192.168.1.215"), pkt)
+	if !dropped || complete {
+		t.Fatalf("reply without deliver bit should be dropped")
 	}
 }

@@ -152,3 +152,109 @@ func TestNonceUniquePerEncode(t *testing.T) {
 		t.Fatalf("two encodes produced identical payloads; nonce not random")
 	}
 }
+
+// TestBuildPollHeader checks the poll header layout: magic, version, both the
+// relay and poll flag bits, room length, and the room bytes.
+func TestBuildPollHeader(t *testing.T) {
+	h, err := BuildPollHeader("lobby")
+	if err != nil {
+		t.Fatalf("BuildPollHeader: %v", err)
+	}
+	if len(h) != relayHeaderBase+len("lobby") {
+		t.Fatalf("header len = %d, want %d", len(h), relayHeaderBase+len("lobby"))
+	}
+	if string(h[0:4]) != magicStr {
+		t.Fatalf("header magic = %q, want %q", h[0:4], magicStr)
+	}
+	if h[4] != protoVer {
+		t.Fatalf("header ver = %d, want %d", h[4], protoVer)
+	}
+	if h[5]&(relayFlag|pollFlag) != (relayFlag | pollFlag) {
+		t.Fatalf("header flag bits not set: 0x%02x", h[5])
+	}
+	if int(h[6]) != len("lobby") {
+		t.Fatalf("header roomLen = %d, want %d", h[6], len("lobby"))
+	}
+	if string(h[7:]) != "lobby" {
+		t.Fatalf("header room = %q, want %q", h[7:], "lobby")
+	}
+}
+
+// TestBuildDeliverHeader checks the delivery header sets relayFlag|deliverFlag.
+func TestBuildDeliverHeader(t *testing.T) {
+	h, err := BuildDeliverHeader("lobby")
+	if err != nil {
+		t.Fatalf("BuildDeliverHeader: %v", err)
+	}
+	if h[5]&(relayFlag|deliverFlag) != (relayFlag | deliverFlag) {
+		t.Fatalf("deliver header flag bits not set: 0x%02x", h[5])
+	}
+}
+
+// TestParsePollRoundTrip verifies a built poll parses back to its room.
+func TestParsePollRoundTrip(t *testing.T) {
+	for _, room := range []string{"", "demo", "a-long-room-name-for-polls"} {
+		h, err := BuildPollHeader(room)
+		if err != nil {
+			t.Fatalf("BuildPollHeader(%q): %v", room, err)
+		}
+		got, ok := ParsePoll(h)
+		if !ok {
+			t.Fatalf("ParsePoll(BuildPollHeader(%q)) ok=false", room)
+		}
+		if got != room {
+			t.Fatalf("room = %q, want %q", got, room)
+		}
+	}
+}
+
+// TestParsePollRejectsTrailingBytes ensures a poll is exactly the relay header;
+// any payload after it is a message, not a poll.
+func TestParsePollRejectsTrailingBytes(t *testing.T) {
+	h, _ := BuildPollHeader("demo")
+	withExtra := append(append([]byte{}, h...), []byte("hi")...)
+	if room, ok := ParsePoll(withExtra); ok || room == "demo" {
+		t.Fatalf("poll with trailing bytes parsed as poll: room=%q", room)
+	}
+}
+
+// TestParseDeliverRoundTrip verifies a delivery header plus inner chat payload
+// parses back to the original chat payload.
+func TestParseDeliverRoundTrip(t *testing.T) {
+	room := "demo"
+	h, err := BuildDeliverHeader(room)
+	if err != nil {
+		t.Fatalf("BuildDeliverHeader: %v", err)
+	}
+	chat := []byte("ICHT\x01\x00\x00\x00\x00\x00\x00\x00hi")
+	wire := append(append([]byte{}, h...), chat...)
+	got, ok := ParseDeliver(wire)
+	if !ok {
+		t.Fatalf("ParseDeliver: ok=false")
+	}
+	if !bytes.Equal(got, chat) {
+		t.Fatalf("deliver payload = %q, want %q", got, chat)
+	}
+}
+
+// TestPollAndDeliverAreDistinct ensures a poll is never parsed as a delivery and
+// vice versa, so the two relay roles stay separable.
+func TestPollAndDeliverAreDistinct(t *testing.T) {
+	poll, _ := BuildPollHeader("demo")
+	if _, ok := ParseDeliver(poll); ok {
+		t.Fatalf("poll parsed as delivery")
+	}
+	deliver, _ := BuildDeliverHeader("demo")
+	if _, ok := ParsePoll(deliver); ok {
+		t.Fatalf("delivery parsed as poll")
+	}
+}
+
+// TestParseDeliverRejectsPollBits makes sure a relay header carrying only the
+// poll bit (no deliver bit) is not treated as a delivery.
+func TestParseDeliverRejectsPollBits(t *testing.T) {
+	h, _ := BuildPollHeader("demo")
+	if _, ok := ParseDeliver(h); ok {
+		t.Fatalf("poll header parsed as delivery")
+	}
+}

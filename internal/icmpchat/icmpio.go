@@ -206,32 +206,60 @@ func (l *Listener) ReadNext() (string, string, bool, error) {
 // ReadEchoRequest reads one raw packet and returns the source IP and the echo
 // request payload (ICMP data, IPv4 header stripped). Echo replies and non-echo
 // or undecodable-header packets yield ok=false so the caller can loop.
-func (l *Listener) ReadEchoRequest() (src net.IP, payload []byte, ok bool, err error) {
+func (l *Listener) ReadEchoRequest() (src net.IP, payload []byte, id, seq int, ok bool, err error) {
 	_ = l.conn.SetReadDeadline(time.Now().Add(listenReadTimeout))
 	defer l.conn.SetReadDeadline(time.Time{})
 	buf := make([]byte, readBufferSize)
 	n, raddr, err := l.conn.ReadFrom(buf)
 	if err != nil {
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			return nil, nil, false, nil
+			return nil, nil, 0, 0, false, nil
 		}
-		return nil, nil, false, err
+		return nil, nil, 0, 0, false, err
 	}
 	ipAddr, ok := raddr.(*net.IPAddr)
 	if !ok {
-		return nil, nil, false, nil
+		return nil, nil, 0, 0, false, nil
 	}
 	raw, err := stripIPHeader(buf[:n])
 	if err != nil {
-		return nil, nil, false, nil
+		return nil, nil, 0, 0, false, nil
 	}
+	// parseEchoRequest is the guard: it accepts echo requests (type 8) but
+	// rejects echo replies (type 0) and anything else, so the relay never
+	// re-forwards the kernel's auto-acks of its own polls and messages.
 	payload, ok = parseEchoRequest(raw)
 	if !ok {
-		// Ignore echo replies (type 0) and anything else; the relay must not
-		// re-forward the kernel's auto-acks of its own forwards.
-		return nil, nil, false, nil
+		return nil, nil, 0, 0, false, nil
 	}
-	return ipAddr.IP, payload, true, nil
+	rm, err := icmp.ParseMessage(1, raw)
+	if err != nil {
+		return nil, nil, 0, 0, false, nil
+	}
+	e, ok := rm.Body.(*icmp.Echo)
+	if !ok {
+		return nil, nil, 0, 0, false, nil
+	}
+	return ipAddr.IP, payload, e.ID, e.Seq, true, nil
+}
+
+// SendReply writes one echo reply (type 0) to ip carrying payload. It uses the
+// raw ip4:icmp socket, which is required because ping (udp4) sockets can only
+// send echo requests; the relay delivers queued messages as echo replies so
+// clients that cannot receive echo requests (such as macOS) can still get them
+// on poll.
+func (l *Listener) SendReply(ip string, id, seq int, payload []byte) bool {
+	msg := icmp.Message{
+		Type: ipv4.ICMPTypeEchoReply,
+		Code: 0,
+		Body: &icmp.Echo{ID: id, Seq: seq, Data: payload},
+	}
+	b, err := msg.Marshal(nil)
+	if err != nil {
+		return false
+	}
+	_, err = l.conn.WriteTo(b, &net.IPAddr{IP: net.ParseIP(ip)})
+	return err == nil
 }
 
 // handlePacket processes one raw IPv4/ICMP packet. It returns (name, text,
@@ -249,21 +277,53 @@ func (l *Listener) handlePacket(src net.IP, pkt []byte) (name, text string, comp
 	if err != nil {
 		return "", "", false, true, err
 	}
-	eData, ok := parseEchoRequest(raw)
-	if !ok {
-		// Only echo requests (type 8) carry our messages; ignore echo replies
-		// (type 0) and everything else.
+	rm, err := icmp.ParseMessage(1, raw)
+	if err != nil {
 		return "", "", false, true, nil
 	}
-	// Relay messages carry a visible routing header in front of the chat
-	// payload; strip it so decode sees the plain ICHT message (which may itself
-	// be encrypted with the caller's key).
-	chatPayload, _ := splitRelay(eData)
+	if l.relay != "" && l.peer == "" {
+		// Relay mode: deliveries arrive as echo replies (type 0) from the relay.
+		return l.handleRelayReply(rm)
+	}
+	// Direct mode: messages arrive as echo requests (type 8) from the peer.
+	return l.handleDirectMessage(rm)
+}
+
+// handleDirectMessage decodes a direct-mode message: an echo request (type 8)
+// from the peer.
+func (l *Listener) handleDirectMessage(rm *icmp.Message) (string, string, bool, bool, error) {
+	e, ok := rm.Body.(*icmp.Echo)
+	if !ok || rm.Type != ipv4.ICMPTypeEcho {
+		// Only echo requests carry direct messages; ignore replies and anything
+		// else (in particular the kernel's echo-back of our own sends).
+		return "", "", false, true, nil
+	}
+	msg, err := decode(e.Data, l.key)
+	if err != nil {
+		return "", "", false, true, nil
+	}
+	text, complete := l.reasm.Add(msg)
+	return msg.Name, text, complete, false, nil
+}
+
+// handleRelayReply decodes a relay-mode delivery: an echo reply (type 0) from
+// the relay carrying a queued chat payload. Everything else from the relay is
+// ignored, including the kernel's echo-back of our own polls and messages, which
+// are replies too but carry no deliverFlag.
+func (l *Listener) handleRelayReply(rm *icmp.Message) (string, string, bool, bool, error) {
+	e, ok := rm.Body.(*icmp.Echo)
+	if !ok || rm.Type != ipv4.ICMPTypeEchoReply {
+		return "", "", false, true, nil
+	}
+	chatPayload, ok := ParseDeliver(e.Data)
+	if !ok {
+		return "", "", false, true, nil
+	}
 	msg, err := decode(chatPayload, l.key)
 	if err != nil {
 		return "", "", false, true, nil
 	}
-	text, complete = l.reasm.Add(msg)
+	text, complete := l.reasm.Add(msg)
 	return msg.Name, text, complete, false, nil
 }
 

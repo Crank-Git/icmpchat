@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -63,47 +64,68 @@ func TestRoomsPrune(t *testing.T) {
 
 // TestRoute verifies relay parsing, membership recording, and target selection.
 func TestRoute(t *testing.T) {
-	r := &rooms{members: map[string]map[string]time.Time{}}
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
 	payload := makeRelayPayload(t, "lobby", "hi")
 
-	room, chat, targets, ok := r.route("10.0.0.1", payload)
-	if !ok {
-		t.Fatalf("route(10.0.0.1) ok=false")
+	res := r.route("10.0.0.1", payload)
+	if res.room != "lobby" || res.isPoll {
+		t.Fatalf("route(10.0.0.1) = %+v, want room lobby, not a poll", res)
 	}
-	if room != "lobby" {
-		t.Fatalf("room = %q, want lobby", room)
+	if len(res.chatPayload) < 4 || string(res.chatPayload[0:4]) != "ICHT" {
+		t.Fatalf("chat payload = %q, want it to start with ICHT magic", res.chatPayload)
 	}
-	if len(chat) < 4 || string(chat[0:4]) != "ICHT" {
-		t.Fatalf("chat payload = %q, want it to start with ICHT magic", chat)
-	}
-	if len(targets) != 0 {
-		t.Fatalf("first sender has %d targets, want 0", len(targets))
+	if len(res.targets) != 0 {
+		t.Fatalf("first sender has %d targets, want 0", len(res.targets))
 	}
 
 	// A second sender in the same room should be targeted by the first.
-	_, _, targets, ok = r.route("10.0.0.2", payload)
-	if !ok || len(targets) != 1 || targets[0] != "10.0.0.1" {
-		t.Fatalf("second route targets = %v, want [10.0.0.1]", targets)
+	res = r.route("10.0.0.2", payload)
+	if res.room != "lobby" || len(res.targets) != 1 || res.targets[0] != "10.0.0.1" {
+		t.Fatalf("second route targets = %v, want [10.0.0.1]", res.targets)
 	}
 }
 
 // TestRouteRejectsNonRelay ensures plain and malformed payloads are rejected.
 func TestRouteRejectsNonRelay(t *testing.T) {
-	r := &rooms{members: map[string]map[string]time.Time{}}
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
 
 	// A plain (non-relay) chat message.
 	plain, err := icmpchat.Encode(&icmpchat.Message{Name: "a", Text: "hi", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, nil)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	if _, _, _, ok := r.route("10.0.0.1", plain); ok {
-		t.Fatalf("plain message should not route")
+	if res := r.route("10.0.0.1", plain); res.room != "" {
+		t.Fatalf("plain message should not route, got %+v", res)
 	}
 
 	// Garbage that is not even our magic.
-	if _, _, _, ok := r.route("10.0.0.1", []byte("nope")); ok {
-		t.Fatalf("garbage should not route")
+	if res := r.route("10.0.0.1", []byte("nope")); res.room != "" {
+		t.Fatalf("garbage should not route, got %+v", res)
 	}
+}
+
+// TestRoutePoll ensures a poll is recognized as a poll and refreshes membership.
+func TestRoutePoll(t *testing.T) {
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
+	poll := makePoll(t, "lobby")
+	res := r.route("10.0.0.1", poll)
+	if res.room != "lobby" || !res.isPoll {
+		t.Fatalf("route(poll) = %+v, want room lobby, isPoll=true", res)
+	}
+	// The poller is now a member.
+	if len(r.memberIPs("lobby", "")) != 1 {
+		t.Fatalf("poller should be a member")
+	}
+}
+
+// makePoll builds a poll payload: exactly the relay header with the poll bit.
+func makePoll(t *testing.T, room string) []byte {
+	t.Helper()
+	h, err := icmpchat.BuildPollHeader(room)
+	if err != nil {
+		t.Fatalf("BuildPollHeader: %v", err)
+	}
+	return h
 }
 
 // makeRelayPayload builds a relay-wrapped chat payload carrying text in room.
@@ -135,4 +157,65 @@ func TestDetectLANIP(t *testing.T) {
 func isLoopback(ip string) bool {
 	parsed := net.ParseIP(ip)
 	return parsed != nil && parsed.IsLoopback()
+}
+
+// TestQueueDrain verifies messages queue per member and drain in order, and that
+// a second drain of the same member returns nothing.
+func TestQueueDrain(t *testing.T) {
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
+	r.add("lobby", "10.0.0.1")
+	r.queue("lobby", "10.0.0.1", []byte("ICHT1"))
+	r.queue("lobby", "10.0.0.1", []byte("ICHT2"))
+
+	got := r.drain("lobby", "10.0.0.1")
+	if len(got) != 2 {
+		t.Fatalf("drain returned %d messages, want 2", len(got))
+	}
+	if string(got[0]) != "ICHT1" || string(got[1]) != "ICHT2" {
+		t.Fatalf("drain order = %q, %q, want ICHT1, ICHT2", got[0], got[1])
+	}
+
+	// A second drain returns nothing: each message is delivered once.
+	if got := r.drain("lobby", "10.0.0.1"); len(got) != 0 {
+		t.Fatalf("second drain returned %d messages, want 0", len(got))
+	}
+}
+
+// TestQueueCapDropsOldest ensures the queue never exceeds maxQueue by dropping
+// the oldest messages when it fills.
+func TestQueueCapDropsOldest(t *testing.T) {
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
+	r.add("lobby", "10.0.0.1")
+	const total = maxQueue + 10
+	for i := 0; i < total; i++ {
+		r.queue("lobby", "10.0.0.1", []byte(fmt.Sprintf("ICHT%d", i)))
+	}
+
+	got := r.drain("lobby", "10.0.0.1")
+	if len(got) != maxQueue {
+		t.Fatalf("drain returned %d messages, want cap %d", len(got), maxQueue)
+	}
+	// The oldest (ICHT0..ICHT9) should have been dropped; the first held is
+	// ICHT10 (total - cap = 74 - 64).
+	if string(got[0]) != fmt.Sprintf("ICHT%d", total-maxQueue) {
+		t.Fatalf("first held message = %q, want ICHT%d (oldest dropped)", got[0], total-maxQueue)
+	}
+}
+
+// TestPruneRemovesQueue ensures a pruned member's queue is cleared too, so it is
+// not delivered after it has left the room.
+func TestPruneRemovesQueue(t *testing.T) {
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
+	r.add("lobby", "10.0.0.1")
+	r.queue("lobby", "10.0.0.1", []byte("ICHT1"))
+
+	// Prune everything: the member is now inactive.
+	r.prune(time.Now())
+
+	if r.members["lobby"] != nil {
+		t.Fatalf("member should have been pruned")
+	}
+	if got := r.drain("lobby", "10.0.0.1"); len(got) != 0 {
+		t.Fatalf("pruned member still has %d queued messages, want 0", len(got))
+	}
 }

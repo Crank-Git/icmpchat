@@ -30,7 +30,9 @@ const (
 	headerLen     = 5  // magic(4) + ver(1)
 	fullHeaderLen = 13 // magic+ver+flags+msgid+chunkIdx+chunkCnt+nameLen
 
-	relayFlag = 0x01 // flags bit: payload carries a visible relay routing header
+	relayFlag   = 0x01 // flags bit: payload carries a visible relay routing header
+	pollFlag    = 0x02 // flags bit: echo request is a poll (client -> relay), payload is exactly the relay header
+	deliverFlag = 0x04 // flags bit: echo reply carries a queued chat payload (relay -> client)
 )
 
 // relayHeaderBase is the length of the visible relay header for an empty room:
@@ -59,13 +61,32 @@ func RelayHeaderLen(room string) int {
 // front of the (possibly encrypted) chat payload and is never sealed, so a
 // relay can route without the key.
 func BuildRelayHeader(room string) ([]byte, error) {
+	return buildRelayHeaderFlags(room, relayFlag)
+}
+
+// BuildPollHeader builds the visible relay header for a client->relay poll. The
+// relayFlag|pollFlag bits mark it so the relay recognizes it as a poll rather
+// than a chat message; the payload is exactly this header and nothing else.
+func BuildPollHeader(room string) ([]byte, error) {
+	return buildRelayHeaderFlags(room, relayFlag|pollFlag)
+}
+
+// BuildDeliverHeader builds the visible relay header for a relay->client
+// delivery. The relayFlag|deliverFlag bits mark it so the client accepts it as a
+// queued message and not as the kernel's echo-back of its own poll or message.
+func BuildDeliverHeader(room string) ([]byte, error) {
+	return buildRelayHeaderFlags(room, relayFlag|deliverFlag)
+}
+
+// buildRelayHeaderFlags builds the visible relay header with the given flags.
+func buildRelayHeaderFlags(room string, flags byte) ([]byte, error) {
 	if len(room) > 255 {
 		return nil, errRoomTooLong
 	}
 	b := make([]byte, RelayHeaderLen(room))
 	copy(b[0:4], magic)
 	b[4] = protoVer
-	b[5] = relayFlag
+	b[5] = flags
 	b[6] = uint8(len(room))
 	copy(b[7:], room)
 	return b, nil
@@ -81,7 +102,7 @@ func RelayRoom(payload []byte) (room string, ok bool, err error) {
 	if !bytes.Equal(payload[0:4], magic) || payload[4] != protoVer {
 		return "", false, errBadMagic
 	}
-	if payload[5]&relayFlag == 0 {
+	if payload[5]&(relayFlag|pollFlag|deliverFlag) == 0 {
 		return "", false, errNotRelay
 	}
 	roomLen := int(payload[6])
@@ -112,6 +133,56 @@ func splitRelay(payload []byte) ([]byte, bool) {
 		return payload, false
 	}
 	return payload[RelayHeaderLen(room):], true
+}
+
+// ParsePoll reports whether payload is a poll: a relay header (relayFlag|pollFlag)
+// with no trailing bytes. It returns the room. ok is false for anything else,
+// including relay headers that carry a chat payload (those are messages, not
+// polls) and headers that are missing the poll bit.
+func ParsePoll(payload []byte) (room string, ok bool) {
+	if len(payload) < relayHeaderBase {
+		return "", false
+	}
+	if !bytes.Equal(payload[0:4], magic) || payload[4] != protoVer {
+		return "", false
+	}
+	if payload[5]&(relayFlag|pollFlag) != (relayFlag | pollFlag) {
+		return "", false
+	}
+	roomLen := int(payload[6])
+	// A poll is exactly the relay header and nothing after it; trailing bytes
+	// mean this is a message, not a poll.
+	if len(payload) != relayHeaderBase+roomLen {
+		return "", false
+	}
+	return string(payload[7 : 7+roomLen]), true
+}
+
+// ParseDeliver reports whether payload is a relay delivery: a relay header with
+// relayFlag|deliverFlag followed by the inner ICHT chat payload. It returns the
+// chat payload. ok is false for polls, plain messages, encrypted nonces, and
+// malformed packets, so a delivery is never mistaken for anything else.
+func ParseDeliver(payload []byte) (chatPayload []byte, ok bool) {
+	if len(payload) < relayHeaderBase {
+		return nil, false
+	}
+	if !bytes.Equal(payload[0:4], magic) || payload[4] != protoVer {
+		return nil, false
+	}
+	if payload[5]&(relayFlag|deliverFlag) != (relayFlag | deliverFlag) {
+		return nil, false
+	}
+	roomLen := int(payload[6])
+	if len(payload) < relayHeaderBase+roomLen {
+		return nil, false
+	}
+	inner := payload[relayHeaderBase+roomLen:]
+	// Require the inner payload to start with the ICHT magic, the same guard as
+	// RelayRoom, so an encrypted nonce can't be mistaken for a delivery.
+	if len(inner) < 4 || !bytes.Equal(inner[0:4], magic) {
+		return nil, false
+	}
+	return inner, true
 }
 
 // Message is one chunk of a chat message.
