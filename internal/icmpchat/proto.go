@@ -135,6 +135,33 @@ func splitRelay(payload []byte) ([]byte, bool) {
 	return payload[RelayHeaderLen(room):], true
 }
 
+// IsForwardableMessage reports whether payload is a relay-wrapped chat message
+// the relay should forward: a relay header carrying the relay flag only (not a
+// poll, not a delivery) followed by an inner ICHT message. A delivery
+// echo-back -- the kernel auto-acking the relay's echo replies (type 0) --
+// carries the deliver bit and is rejected here, so the relay never re-forwards
+// its own output.
+func IsForwardableMessage(payload []byte) (room string, chatPayload []byte, ok bool) {
+	if len(payload) < relayHeaderBase {
+		return "", nil, false
+	}
+	if !bytes.Equal(payload[0:4], magic) || payload[4] != protoVer || payload[5] != relayFlag {
+		// relayFlag only distinguishes a forwardable message from a poll or a
+		// delivery echo-back; anything else is not forwarded.
+		return "", nil, false
+	}
+	roomLen := int(payload[6])
+	if len(payload) < relayHeaderBase+roomLen {
+		return "", nil, false
+	}
+	room = string(payload[7 : 7+roomLen])
+	chatPayload = payload[relayHeaderBase+roomLen:]
+	if len(chatPayload) < 4 || !bytes.Equal(chatPayload[0:4], magic) {
+		return "", nil, false
+	}
+	return room, chatPayload, true
+}
+
 // ParsePoll reports whether payload is a poll: a relay header (relayFlag|pollFlag)
 // with no trailing bytes. It returns the room. ok is false for anything else,
 // including relay headers that carry a chat payload (those are messages, not

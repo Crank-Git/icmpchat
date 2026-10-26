@@ -141,3 +141,60 @@ func TestRelayHeaderTooLong(t *testing.T) {
 		t.Fatalf("want errRoomTooLong, got %v", err)
 	}
 }
+
+// TestIsForwardableMessage checks that a relay-wrapped chat message is reported
+// as forwardable, with the room and inner chat payload.
+func TestIsForwardableMessage(t *testing.T) {
+	room := "room-42"
+	header, err := BuildRelayHeader(room)
+	if err != nil {
+		t.Fatalf("BuildRelayHeader: %v", err)
+	}
+	chat, err := Encode(&Message{Name: "bob", Text: "relayed", MsgID: 9, ChunkIdx: 0, ChunkCnt: 1}, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	msg := append(append([]byte{}, header...), chat...)
+
+	gotRoom, gotChat, ok := IsForwardableMessage(msg)
+	if !ok {
+		t.Fatalf("IsForwardableMessage(msg) ok=false")
+	}
+	if gotRoom != room {
+		t.Fatalf("room = %q, want %q", gotRoom, room)
+	}
+	if !bytes.Equal(gotChat, chat) {
+		t.Fatalf("chat payload = %q, want %q", gotChat, chat)
+	}
+}
+
+// TestIsForwardableMessageRejectsDelivery ensures a delivery echo-back (the
+// relay's own output, re-arriving as a kernel auto-ack) is not forwarded.
+func TestIsForwardableMessageRejectsDelivery(t *testing.T) {
+	room := "room-42"
+	header, err := BuildDeliverHeader(room)
+	if err != nil {
+		t.Fatalf("BuildDeliverHeader: %v", err)
+	}
+	chat, err := Encode(&Message{Name: "bob", Text: "relayed", MsgID: 9, ChunkIdx: 0, ChunkCnt: 1}, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	deliver := append(append([]byte{}, header...), chat...)
+
+	if _, _, ok := IsForwardableMessage(deliver); ok {
+		t.Fatalf("delivery echo-back reported as forwardable")
+	}
+}
+
+// TestIsForwardableMessageRejectsPoll ensures a poll is not treated as a
+// forwardable message.
+func TestIsForwardableMessageRejectsPoll(t *testing.T) {
+	header, err := BuildPollHeader("room-42")
+	if err != nil {
+		t.Fatalf("BuildPollHeader: %v", err)
+	}
+	if _, _, ok := IsForwardableMessage(header); ok {
+		t.Fatalf("poll reported as forwardable message")
+	}
+}

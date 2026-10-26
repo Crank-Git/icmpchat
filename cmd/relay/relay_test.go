@@ -219,3 +219,29 @@ func TestPruneRemovesQueue(t *testing.T) {
 		t.Fatalf("pruned member still has %d queued messages, want 0", len(got))
 	}
 }
+
+// TestRouteRejectsDeliveryEchoBack is the regression test for a relay feedback
+// loop: when the relay delivers a message as an echo reply (type 0), the
+// receiver's kernel auto-acks it by sending an echo request back carrying the
+// deliver bit. That echo-back must not be re-forwarded to other members.
+func TestRouteRejectsDeliveryEchoBack(t *testing.T) {
+	r := &rooms{members: map[string]map[string]time.Time{}, queues: map[string]map[string][][]byte{}}
+	header, err := icmpchat.BuildDeliverHeader("lobby")
+	if err != nil {
+		t.Fatalf("BuildDeliverHeader: %v", err)
+	}
+	chat, err := icmpchat.Encode(&icmpchat.Message{Name: "x", Text: "y", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, nil)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	echoBack := append(append([]byte{}, header...), chat...)
+
+	res := r.route("10.0.0.2", echoBack)
+	if res.room != "" || res.isPoll || res.chatPayload != nil {
+		t.Fatalf("delivery echo-back routed: %+v, want empty", res)
+	}
+	// The echo-back must not have registered its sender as a member either.
+	if len(r.memberIPs("lobby", "")) != 0 {
+		t.Fatalf("echo-back sender should not be a member")
+	}
+}

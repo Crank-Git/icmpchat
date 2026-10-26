@@ -208,24 +208,24 @@ type routeResult struct {
 
 // route parses a relay packet, records src as a member of the room, and reports
 // whether it is a poll (which the caller drains) or a message (which the caller
-// queues to the other targets). ok is false for non-relay or malformed packets.
-// It performs no network I/O so the routing decision can be unit tested.
+// queues to the other targets). A delivery echo-back -- the kernel auto-acking
+// the relay's echo replies -- is rejected, so it is never re-forwarded. It
+// performs no network I/O so the routing decision can be unit tested.
 func (r *rooms) route(src string, payload []byte) routeResult {
 	// A poll is exactly the relay header with the poll bit and nothing after it.
 	if room, ok := icmpchat.ParsePoll(payload); ok {
 		r.add(room, src)
 		return routeResult{room: room, isPoll: true}
 	}
-	room, ok, _ := icmpchat.RelayRoom(payload)
-	if !ok {
-		return routeResult{}
+	if room, chatPayload, ok := icmpchat.IsForwardableMessage(payload); ok {
+		// A forwardable message carries the relay flag only. A delivery
+		// echo-back (the kernel auto-acking our echo replies) carries the
+		// deliver bit and is rejected by IsForwardableMessage, so it is never
+		// re-forwarded to other members.
+		r.add(room, src)
+		return routeResult{room: room, chatPayload: chatPayload, targets: r.memberIPs(room, src)}
 	}
-	chatPayload := payload[icmpchat.RelayHeaderLen(room):]
-	if len(chatPayload) < 4 || string(chatPayload[0:4]) != "ICHT" {
-		return routeResult{}
-	}
-	r.add(room, src)
-	return routeResult{room: room, chatPayload: chatPayload, targets: r.memberIPs(room, src)}
+	return routeResult{}
 }
 
 // detectLANIP returns the first non-loopback IPv4 address on the host. It is a
