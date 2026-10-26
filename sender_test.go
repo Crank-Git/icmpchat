@@ -45,6 +45,13 @@ func TestSenderLoopback(t *testing.T) {
 	}
 	defer s.Close()
 
+	if s.raw {
+		// The raw fallback needs root and uses a divergent send path (net.IPAddr
+		// destination); it is exercised by the e2e binary test instead of this
+		// unprivileged-socket check.
+		t.Skip("raw sender fallback; covered by the e2e binary test")
+	}
+
 	payload := []byte("ICHT\x01\x00\x00\x00\x00\x00\x00\x00hello")
 	if !s.Send(payload) {
 		t.Fatalf("Send did not receive echo reply within timeout")

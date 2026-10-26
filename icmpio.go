@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net"
 	"sync/atomic"
 	"time"
@@ -27,28 +28,38 @@ var (
 	errShortPacket = errors.New("icmpchat: packet shorter than IP header")
 )
 
-// Sender sends ICMP echo requests over an unprivileged UDP-wrapped ICMP
-// socket. The kernel rewrites the ICMP identifier, so routing uses the payload,
-// never the ID.
+// Sender sends ICMP echo requests and uses the kernel's echo reply as a
+// delivery acknowledgment. Routing uses the payload, never the ICMP ID, which
+// the kernel rewrites on UDP-wrapped sockets.
+//
+// The primary path is an unprivileged udp4 ICMP socket (works on macOS and
+// most Linux hosts). Some hardened Linux hosts (e.g. containers that block
+// SOCK_DGRAM ICMP) reject that even as root; there the sender falls back to a
+// raw ip4:icmp socket, which requires root. Both paths marshal the same ICMP
+// message; only the destination address type and the reply read differ.
 type Sender struct {
 	conn *icmp.PacketConn
-	peer *net.UDPAddr
+	peer *net.UDPAddr  // destination for the udp4 (unprivileged) path
+	dst  *net.IPAddr   // destination for the raw fallback path
+	raw  bool          // true when the raw-socket fallback is in use
 }
 
-// NewSender opens a UDP-ICMP socket bound to all interfaces. A raw-socket
-// fallback is intentionally omitted: udp4 ICMP send is available unprivileged
-// on macOS and Linux (verified), and raw send additionally needs root, so the
-// fallback would be unreachable. Adding it would require a divergent Send path
-// (raw reads include the IP header), so we keep the single verified path.
+// NewSender opens an ICMP echo-request socket bound to all interfaces. It
+// first tries an unprivileged udp4 ICMP socket (works on macOS and most Linux
+// hosts). When the OS blocks that -- common on hardened Linux hosts that deny
+// SOCK_DGRAM ICMP even as root -- it falls back to a raw ip4:icmp socket,
+// which requires root. The returned Sender drives both paths identically.
 func NewSender(peerIP string) (*Sender, error) {
+	ip := net.ParseIP(peerIP)
 	conn, err := icmp.ListenPacket("udp4", "0.0.0.0")
-	if err != nil {
-		return nil, err
+	if err == nil {
+		return &Sender{conn: conn, peer: &net.UDPAddr{IP: ip, Port: 0}}, nil
 	}
-	return &Sender{
-		conn: conn,
-		peer: &net.UDPAddr{IP: net.ParseIP(peerIP), Port: 0},
-	}, nil
+	raw, rerr := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
+	if rerr != nil {
+		return nil, fmt.Errorf("icmpchat: sender socket: udp4 ICMP: %v; raw ICMP: %v", err, rerr)
+	}
+	return &Sender{conn: raw, dst: &net.IPAddr{IP: ip}, raw: true}, nil
 }
 
 func (s *Sender) Close() {
@@ -68,7 +79,13 @@ func (s *Sender) Send(payload []byte) bool {
 		return false
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := s.conn.WriteTo(b, s.peer); err != nil {
+		var err error
+		if s.raw {
+			_, err = s.conn.WriteTo(b, s.dst)
+		} else {
+			_, err = s.conn.WriteTo(b, s.peer)
+		}
+		if err != nil {
 			return false
 		}
 		if s.waitReply(payload) {
@@ -89,7 +106,13 @@ func (s *Sender) waitReply(payload []byte) bool {
 		if err != nil {
 			return false
 		}
-		rm, err := icmp.ParseMessage(1, buf[:n]) // ICMP is IP protocol 1
+		// The udp4 path returns raw ICMP; the raw path returns the ICMP message
+		// possibly preceded by an IPv4 header. stripIPHeader handles both.
+		raw, err := stripIPHeader(buf[:n])
+		if err != nil {
+			continue
+		}
+		rm, err := icmp.ParseMessage(1, raw) // ICMP is IP protocol 1
 		if err != nil {
 			continue
 		}
@@ -184,11 +207,17 @@ func (l *Listener) handlePacket(src net.IP, pkt []byte) (name, text string, comp
 	return msg.Name, text, complete, false, nil
 }
 
-// stripIPHeader removes the leading IPv4 header; its length (IHL, in 32-bit
-// words) is in the first byte. macOS and Linux both deliver the header first.
+// stripIPHeader removes the leading IPv4 header when present. The header's
+// length (IHL, in 32-bit words) is in the first byte. Most kernels deliver the
+// ICMP message preceded by the IPv4 header (first byte 0x45), but some hosts
+// deliver the raw ICMP message without it (first byte is the ICMP type, e.g.
+// 0x00). The version nibble distinguishes the two: only strip when it is 4.
 func stripIPHeader(b []byte) ([]byte, error) {
 	if len(b) < 20 {
 		return nil, errShortPacket
+	}
+	if b[0]>>4 != 4 {
+		return b, nil // no IPv4 header present
 	}
 	ihl := int(b[0]&0x0f) * 4
 	if ihl < 20 || ihl > len(b) {
