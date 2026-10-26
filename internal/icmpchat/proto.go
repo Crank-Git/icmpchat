@@ -88,6 +88,15 @@ func RelayRoom(payload []byte) (room string, ok bool, err error) {
 	if len(payload) < relayHeaderBase+roomLen {
 		return "", false, errShort
 	}
+	// The relay header fronts a chat payload that must itself begin with the
+	// ICHT magic. That requirement is what separates a genuine relay header from
+	// the start of an encrypted (non-relay) message: after magic+ver an encrypted
+	// payload carries a random nonce, whose first byte can coincidentally set the
+	// relay-flag bit and whose next byte can coincidentally read as a room length.
+	// Requiring the inner payload to start with ICHT rejects those false positives.
+	if inner := payload[relayHeaderBase+roomLen:]; len(inner) < 4 || !bytes.Equal(inner[0:4], magic) {
+		return "", false, errNotRelay
+	}
 	return string(payload[7 : 7+roomLen]), true, nil
 }
 

@@ -91,6 +91,46 @@ func TestSplitRelay(t *testing.T) {
 	}
 }
 
+// TestRelayRoomRejectsEncryptedCollision is the regression test for a subtle
+// bug: after magic+ver an encrypted payload carries a random 12-byte nonce, so
+// byte 5 is a nonce byte, not the flags byte. A nonce byte has a 50% chance of
+// setting the relay-flag bit and its neighbour can read as a room length, which
+// a naive RelayRoom would mistake for a relay header and slice a garbage prefix
+// off the chat payload (surfacing as a decode "bad magic"). Such a payload must
+// never be reported as a relay header.
+func TestRelayRoomRejectsEncryptedCollision(t *testing.T) {
+	key := NewKey("s3cret")
+	for i := 0; i < 2000; i++ {
+		payload, err := Encode(&Message{Name: "carol", Text: "secret text", MsgID: 5, ChunkIdx: 0, ChunkCnt: 1}, key)
+		if err != nil {
+			t.Fatalf("Encode: %v", err)
+		}
+		// A genuine false positive reports ok=true with a bogus room. The
+		// errNotRelay error with ok=false is the correct, expected result for a
+		// non-relay payload and must not be treated as a failure.
+		if room, ok, _ := RelayRoom(payload); ok {
+			t.Fatalf("encrypted non-relay payload mistaken for relay: room=%q", room)
+		}
+	}
+}
+
+// TestRelayRoomRejectsBogusInnerHeader covers the deterministic collision: a
+// payload whose byte 5 sets the relay-flag bit and whose byte 6 looks like a
+// room length, but whose inner bytes are not the ICHT magic. It must be
+// rejected, not treated as a relay header.
+func TestRelayRoomRejectsBogusInnerHeader(t *testing.T) {
+	room := "x"
+	b := make([]byte, relayHeaderBase+len(room)+4)
+	copy(b[0:4], magic)
+	b[4] = protoVer
+	b[5] = relayFlag | 0x02 // nonce-collision: low flag bit happens to be set
+	b[6] = uint8(len(room))
+	copy(b[7:7+len(room)], room) // inner bytes are not ICHT
+	if _, ok, _ := RelayRoom(b); ok {
+		t.Fatalf("bogus inner header reported as relay; must be rejected")
+	}
+}
+
 // TestRelayHeaderTooLong guards the 255-byte room limit.
 func TestRelayHeaderTooLong(t *testing.T) {
 	long := make([]byte, 256)
