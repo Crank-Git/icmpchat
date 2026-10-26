@@ -1,4 +1,4 @@
-package main
+package icmpchat
 
 import (
 	"bytes"
@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Wire format (ICMP Echo payload, big-endian):
@@ -28,7 +29,13 @@ const (
 	aeadOverhead  = 16 // GCM authentication tag
 	headerLen     = 5  // magic(4) + ver(1)
 	fullHeaderLen = 13 // magic+ver+flags+msgid+chunkIdx+chunkCnt+nameLen
+
+	relayFlag = 0x01 // flags bit: payload carries a visible relay routing header
 )
+
+// relayHeaderBase is the length of the visible relay header for an empty room:
+// magic(4) + ver(1) + flags(1) + roomLen(1) + room(0).
+const relayHeaderBase = 7
 
 var (
 	magic          = []byte(magicStr)
@@ -36,7 +43,67 @@ var (
 	errBadVer      = errors.New("icmpchat: unsupported protocol version")
 	errShort       = errors.New("icmpchat: packet too short")
 	errNameTooLong = errors.New("icmpchat: name too long (max 255 bytes)")
+	errRoomTooLong = errors.New("icmpchat: room too long (max 255 bytes)")
+	errNotRelay    = errors.New("icmpchat: not a relay payload")
 )
+
+// relayHeaderLen returns the on-wire length of the visible relay routing
+// header for the given room name.
+func RelayHeaderLen(room string) int {
+	return relayHeaderBase + len(room)
+}
+
+// BuildRelayHeader returns the visible routing prefix for a relay message. The
+// relay flag marks the payload so receivers know to strip it before decoding;
+// the room lets the relay route to the right chat room. This header sits in
+// front of the (possibly encrypted) chat payload and is never sealed, so a
+// relay can route without the key.
+func BuildRelayHeader(room string) ([]byte, error) {
+	if len(room) > 255 {
+		return nil, errRoomTooLong
+	}
+	b := make([]byte, RelayHeaderLen(room))
+	copy(b[0:4], magic)
+	b[4] = protoVer
+	b[5] = relayFlag
+	b[6] = uint8(len(room))
+	copy(b[7:], room)
+	return b, nil
+}
+
+// relayRoom inspects a payload's leading bytes and reports whether they form a
+// relay header, returning the room when they do. A clear relay flag means the
+// payload is a plain chat message and relayRoom reports ok=false.
+func RelayRoom(payload []byte) (room string, ok bool, err error) {
+	if len(payload) < relayHeaderBase {
+		return "", false, errShort
+	}
+	if !bytes.Equal(payload[0:4], magic) || payload[4] != protoVer {
+		return "", false, errBadMagic
+	}
+	if payload[5]&relayFlag == 0 {
+		return "", false, errNotRelay
+	}
+	roomLen := int(payload[6])
+	if len(payload) < relayHeaderBase+roomLen {
+		return "", false, errShort
+	}
+	return string(payload[7 : 7+roomLen]), true, nil
+}
+
+// splitRelay separates a visible relay header from the chat payload it fronts.
+// It returns the chat payload and true when a relay header was present, or the
+// original buffer and false for a plain chat message.
+func splitRelay(payload []byte) ([]byte, bool) {
+	room, ok, err := RelayRoom(payload)
+	if err != nil || !ok {
+		return payload, false
+	}
+	if len(payload) < RelayHeaderLen(room) {
+		return payload, false
+	}
+	return payload[RelayHeaderLen(room):], true
+}
 
 // Message is one chunk of a chat message.
 type Message struct {
@@ -48,7 +115,18 @@ type Message struct {
 	ChunkCnt uint8
 }
 
-func newKey(passphrase string) []byte {
+// RandMsgID returns a random message id used to identify a chunked message's
+// fragments during reassembly.
+func RandMsgID() uint32 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint32(time.Now().UnixNano())
+	}
+	return binary.BigEndian.Uint32(b[:])
+}
+
+// NewKey derives a 32-byte key from a passphrase via SHA-256.
+func NewKey(passphrase string) []byte {
 	sum := sha256.Sum256([]byte(passphrase))
 	return sum[:]
 }
@@ -65,7 +143,11 @@ func newAEAD(key []byte) cipher.AEAD {
 	return aead
 }
 
-func encode(m *Message, key []byte) ([]byte, error) {
+// Encode serializes a message into an on-wire ICMP payload. With a key the
+// payload after the 5-byte header is sealed with AES-256-GCM and a random
+// nonce is prepended; the visible header stays unencrypted so listeners and
+// relays can route without the key.
+func Encode(m *Message, key []byte) ([]byte, error) {
 	if len(m.Name) > 255 {
 		return nil, errNameTooLong
 	}
@@ -147,12 +229,18 @@ func decode(payload []byte, key []byte) (*Message, error) {
 // chunkText splits text into chunks that each fit within maxPayload bytes once
 // encoded. The name is carried in every chunk, so it is subtracted from the
 // per-chunk budget.
-func chunkText(name, text string, key []byte) ([][]byte, uint8, error) {
+// ChunkText splits text into chunks that each fit within maxPayload bytes once
+// encoded, accounting for framing overhead added on top of each chunk (such as
+// a relay routing header). The name is carried in every chunk, so it is
+// subtracted from the per-chunk budget.
+func ChunkText(name, text string, key []byte, overhead int) ([][]byte, uint8, error) {
 	extra := 0
 	if key != nil {
 		extra = nonceLen + aeadOverhead
 	}
-	capacity := maxPayload - fullHeaderLen - len(name) - extra
+	// Account for any framing (such as a relay routing header) added on top of
+	// each chunk so the total ICMP payload never exceeds maxPayload.
+	capacity := maxPayload - fullHeaderLen - len(name) - extra - overhead
 	if capacity < 1 {
 		capacity = 1
 	}

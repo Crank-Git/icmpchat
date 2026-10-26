@@ -1,4 +1,4 @@
-package main
+package icmpchat
 
 import (
 	"strconv"
@@ -9,7 +9,7 @@ import (
 // to a receiver reassembler exactly as the listener's handlePacket would.
 func simulateTransport(t *testing.T, rs *reassembler, m *Message, key []byte) (string, bool) {
 	t.Helper()
-	payload, err := encode(m, key)
+	payload, err := Encode(m, key)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -26,7 +26,7 @@ func simulateTransport(t *testing.T, rs *reassembler, m *Message, key []byte) (s
 // TestIntegrationChunkedRoundTrip sends a long message one chunk at a time in
 // order and out of order, then verifies full reassembly.
 func TestIntegrationChunkedRoundTrip(t *testing.T) {
-	key := newKey("integration-key")
+	key := NewKey("integration-key")
 	name := "carol"
 	base := "integration test sentence that runs longer than a single 1000-byte " +
 		"ICMP payload, so the encoder must split it into several chunks and the " +
@@ -36,7 +36,7 @@ func TestIntegrationChunkedRoundTrip(t *testing.T) {
 		text += base
 	}
 
-	chunks, cnt, err := chunkText(name, text, key)
+	chunks, cnt, err := ChunkText(name, text, key, 0)
 	if err != nil {
 		t.Fatalf("chunkText: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestIntegrationManyMessages(t *testing.T) {
 	for i := 0; i < n; i++ {
 		name := "u" + string(rune('a'+i%26))
 		text := "message number" + strconv.Itoa(i)
-		chunks, cnt, err := chunkText(name, text, nil)
+		chunks, cnt, err := ChunkText(name, text, nil, 0)
 		if err != nil {
 			t.Fatalf("chunkText: %v", err)
 		}
@@ -99,11 +99,11 @@ func TestIntegrationManyMessages(t *testing.T) {
 // TestIntegrationCipherMismatchFails ensures a ciphertext produced with one key
 // cannot be decoded by a receiver holding a different key.
 func TestIntegrationCipherMismatchFails(t *testing.T) {
-	senderKey := newKey("sender")
-	receiverKey := newKey("receiver")
+	senderKey := NewKey("sender")
+	receiverKey := NewKey("receiver")
 
 	m := &Message{Name: "d", Text: "secret payload", MsgID: 7, ChunkIdx: 0, ChunkCnt: 1}
-	payload, err := encode(m, senderKey)
+	payload, err := Encode(m, senderKey)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}

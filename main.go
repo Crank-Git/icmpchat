@@ -2,12 +2,12 @@ package main
 
 import (
 	"bufio"
-	"crypto/rand"
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"os"
 	"time"
+
+	"icmpchat/internal/icmpchat"
 )
 
 // incomingMsg is a fully reassembled chat message from the listener goroutine.
@@ -17,30 +17,40 @@ type incomingMsg struct {
 }
 
 func main() {
-	peer := flag.String("peer", "", "peer IP address (required)")
+	peer := flag.String("peer", "", "peer IP address (required for direct mode)")
 	name := flag.String("name", "anon", "your display name")
 	keyPass := flag.String("key", "", "optional passphrase for payload encryption")
+	relay := flag.String("relay", "", "relay server IP; when set, messages are routed through it for one-to-many chat")
+	room := flag.String("room", "lobby", "chat room to join when relaying")
 	flag.Parse()
 
-	if *peer == "" {
-		fmt.Fprintln(os.Stderr, "usage: icmpchat --peer <ip> [--name <nick>] [--key <passphrase>]")
+	if *peer == "" && *relay == "" {
+		fmt.Fprintln(os.Stderr, "usage: icmpchat [--peer <ip> | --relay <ip>] [--name <nick>] [--room <name>] [--key <passphrase>]")
 		os.Exit(2)
 	}
 
 	var key []byte
 	if *keyPass != "" {
-		key = newKey(*keyPass)
+		key = icmpchat.NewKey(*keyPass)
 	}
 
-	sender, err := NewSender(*peer)
+	// overhead is the relay routing header added in front of each chunk when
+	// relaying, so chunking keeps the total ICMP payload within the limit.
+	overhead := 0
+	relayRoom := *room
+	if *relay != "" {
+		overhead = icmpchat.RelayHeaderLen(relayRoom)
+	}
+
+	sender, err := icmpchat.NewSender(sendTarget(*peer, *relay))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot open sender socket: %v\n", err)
 		os.Exit(1)
 	}
 	defer sender.Close()
 
-	var listener *Listener
-	if l, err := NewListener(*peer, key); err != nil {
+	var listener *icmpchat.Listener
+	if l, err := icmpchat.NewListener(*peer, *relay, key); err != nil {
 		fmt.Fprintf(os.Stderr, "receiving needs root: run with sudo (could not open raw ICMP socket: %v)\n", err)
 		fmt.Fprintln(os.Stderr, "running in send-only mode; enable receiving with sudo.")
 	} else {
@@ -56,7 +66,11 @@ func main() {
 	}
 	go inputLoop(lines)
 
-	fmt.Printf("icmpchat: chatting as %q, peer %s\n", *name, *peer)
+	if *relay != "" {
+		fmt.Printf("icmpchat: chatting as %q via relay %s, room %q\n", *name, *relay, relayRoom)
+	} else {
+		fmt.Printf("icmpchat: chatting as %q, peer %s\n", *name, *peer)
+	}
 	if key != nil {
 		fmt.Println("payload encryption: on")
 	} else {
@@ -80,7 +94,7 @@ func main() {
 				fmt.Print("> ")
 				continue
 			}
-			sendLine(line, *peer, *name, key, sender)
+			sendLine(line, *name, key, sender, *relay, relayRoom, overhead)
 		}
 	}
 }
@@ -100,7 +114,7 @@ func inputLoop(lines chan<- string) {
 	}
 }
 
-func listenLoop(l *Listener, incoming chan<- incomingMsg) {
+func listenLoop(l *icmpchat.Listener, incoming chan<- incomingMsg) {
 	for {
 		msgName, text, ok, err := l.ReadNext()
 		if err != nil {
@@ -120,26 +134,40 @@ func printIncoming(msg incomingMsg) {
 }
 
 // sendLine encodes and transmits one chat message, chunking long text, and
-// reports delivery per transmitted chunk.
-func sendLine(line, peer, name string, key []byte, sender *Sender) {
-	chunks, cnt, err := chunkText(name, line, key)
+// reports delivery per transmitted chunk. When relay is set, each chunk is
+// wrapped in a visible relay routing header for the given room.
+func sendLine(line, name string, key []byte, sender *icmpchat.Sender, relay, room string, overhead int) {
+	chunks, cnt, err := icmpchat.ChunkText(name, line, key, overhead)
 	if err != nil {
 		fmt.Println("✗ (message too long)")
 		return
 	}
-	msgID := randMsgID()
+	msgID := icmpchat.RandMsgID()
 	for i, c := range chunks {
-		m := &Message{
+		m := &icmpchat.Message{
 			Name:     name,
 			Text:     string(c),
 			MsgID:    msgID,
 			ChunkIdx: uint8(i),
 			ChunkCnt: cnt,
 		}
-		payload, err := encode(m, key)
+		chatPayload, err := icmpchat.Encode(m, key)
 		if err != nil {
 			fmt.Println("✗ (encode error)")
 			return
+		}
+		var payload []byte
+		if relay != "" {
+			header, err := icmpchat.BuildRelayHeader(room)
+			if err != nil {
+				fmt.Printf("✗ (relay header: %v)\n", err)
+				return
+			}
+			payload = make([]byte, 0, len(header)+len(chatPayload))
+			payload = append(payload, header...)
+			payload = append(payload, chatPayload...)
+		} else {
+			payload = chatPayload
 		}
 		if sender.Send(payload) {
 			fmt.Println("✓")
@@ -150,12 +178,13 @@ func sendLine(line, peer, name string, key []byte, sender *Sender) {
 	}
 }
 
-func randMsgID() uint32 {
-	var b [4]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return uint32(time.Now().UnixNano())
+// sendTarget returns the destination IP for outgoing packets: the relay when
+// relaying, otherwise the direct peer.
+func sendTarget(peer, relay string) string {
+	if relay != "" {
+		return relay
 	}
-	return binary.BigEndian.Uint32(b[:])
+	return peer
 }
 
 func trimLineEndings(line string) string {

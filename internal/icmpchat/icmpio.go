@@ -1,4 +1,4 @@
-package main
+package icmpchat
 
 import (
 	"bytes"
@@ -39,9 +39,9 @@ var (
 // message; only the destination address type and the reply read differ.
 type Sender struct {
 	conn *icmp.PacketConn
-	peer *net.UDPAddr  // destination for the udp4 (unprivileged) path
-	dst  *net.IPAddr   // destination for the raw fallback path
-	raw  bool          // true when the raw-socket fallback is in use
+	peer *net.UDPAddr // destination for the udp4 (unprivileged) path
+	dst  *net.IPAddr  // destination for the raw fallback path
+	raw  bool         // true when the raw-socket fallback is in use
 }
 
 // NewSender opens an ICMP echo-request socket bound to all interfaces. It
@@ -95,6 +95,30 @@ func (s *Sender) Send(payload []byte) bool {
 	return false
 }
 
+// SendRaw writes one echo request to ip without waiting for a reply. The relay
+// uses it to forward messages to many members quickly; delivery acks come
+// separately from each member's kernel auto-reply.
+func (s *Sender) SendRaw(ip string, payload []byte) bool {
+	msg := icmp.Message{
+		Type: ipv4.ICMPTypeEcho,
+		Code: 0,
+		Body: &icmp.Echo{Seq: nextSeq(), Data: payload},
+	}
+	b, err := msg.Marshal(nil)
+	if err != nil {
+		return false
+	}
+	ipn := net.ParseIP(ip)
+	var addr net.Addr
+	if s.raw {
+		addr = &net.IPAddr{IP: ipn}
+	} else {
+		addr = &net.UDPAddr{IP: ipn}
+	}
+	_, err = s.conn.WriteTo(b, addr)
+	return err == nil
+}
+
 // waitReply reads until the echo reply carrying payload arrives or the
 // deadline passes, then clears the deadline so the socket can be reused.
 func (s *Sender) waitReply(payload []byte) bool {
@@ -126,22 +150,24 @@ func (s *Sender) waitReply(payload []byte) bool {
 	}
 }
 
-// Listener receives ICMP echo requests on a raw socket (needs root).
+// Listener receives ICMP echo requests on a raw socket (needs root). When
+// relay is set, it also accepts messages forwarded by the relay at that IP.
 type Listener struct {
 	conn  *icmp.PacketConn
-	peer  string
+	peer  string // direct peer; packets from here are decoded as plain messages
+	relay string // relay IP; packets from here carry a relay routing header
 	key   []byte
 	reasm *reassembler
 }
 
 // NewListener opens a raw IPv4 ICMP socket bound to all interfaces. It fails
-// without root privileges.
-func NewListener(peer string, key []byte) (*Listener, error) {
+// without root privileges. relay may be empty for direct (peer-only) use.
+func NewListener(peer string, relay string, key []byte) (*Listener, error) {
 	conn, err := icmp.ListenPacket("ip4:icmp", "0.0.0.0")
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{conn: conn, peer: peer, key: key, reasm: newReassembler()}, nil
+	return &Listener{conn: conn, peer: peer, relay: relay, key: key, reasm: newReassembler()}, nil
 }
 
 func (l *Listener) Close() {
@@ -163,7 +189,10 @@ func (l *Listener) ReadNext() (string, string, bool, error) {
 		return "", "", false, err
 	}
 	ipAddr, ok := raddr.(*net.IPAddr)
-	if !ok || ipAddr.IP.String() != l.peer {
+	if !ok {
+		return "", "", false, nil
+	}
+	if ipAddr.IP.String() != l.peer && (l.relay == "" || ipAddr.IP.String() != l.relay) {
 		return "", "", false, nil
 	}
 	name, text, complete, dropped, perr := l.handlePacket(ipAddr.IP, buf[:n])
@@ -172,6 +201,39 @@ func (l *Listener) ReadNext() (string, string, bool, error) {
 		return "", "", false, nil
 	}
 	return name, text, complete, nil
+}
+
+// ReadEchoRequest reads one raw packet and returns the source IP and the echo
+// request payload (ICMP data, IPv4 header stripped). Echo replies and non-echo
+// or undecodable-header packets yield ok=false so the caller can loop.
+func (l *Listener) ReadEchoRequest() (src net.IP, payload []byte, ok bool, err error) {
+	_ = l.conn.SetReadDeadline(time.Now().Add(listenReadTimeout))
+	defer l.conn.SetReadDeadline(time.Time{})
+	buf := make([]byte, readBufferSize)
+	n, raddr, err := l.conn.ReadFrom(buf)
+	if err != nil {
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, err
+	}
+	ipAddr, ok := raddr.(*net.IPAddr)
+	if !ok {
+		return nil, nil, false, nil
+	}
+	raw, err := stripIPHeader(buf[:n])
+	if err != nil {
+		return nil, nil, false, nil
+	}
+	rm, err := icmp.ParseMessage(1, raw)
+	if err != nil {
+		return nil, nil, false, nil
+	}
+	e, ok := rm.Body.(*icmp.Echo)
+	if !ok {
+		return nil, nil, false, nil
+	}
+	return ipAddr.IP, e.Data, true, nil
 }
 
 // handlePacket processes one raw IPv4/ICMP packet. It returns (name, text,
@@ -199,7 +261,11 @@ func (l *Listener) handlePacket(src net.IP, pkt []byte) (name, text string, comp
 	if !ok {
 		return "", "", false, true, nil
 	}
-	msg, err := decode(e.Data, l.key)
+	// Relay messages carry a visible routing header in front of the chat
+	// payload; strip it so decode sees the plain ICHT message (which may itself
+	// be encrypted with the caller's key).
+	chatPayload, _ := splitRelay(e.Data)
+	msg, err := decode(chatPayload, l.key)
 	if err != nil {
 		return "", "", false, true, nil
 	}

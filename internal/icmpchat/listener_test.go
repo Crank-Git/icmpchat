@@ -1,4 +1,4 @@
-package main
+package icmpchat
 
 import (
 	"net"
@@ -33,7 +33,7 @@ func newTestListener(key []byte) *Listener {
 func TestHandleEchoRequest(t *testing.T) {
 	l := newTestListener(nil)
 	msg := &Message{Name: "alice", Text: "ping", MsgID: 11, ChunkIdx: 0, ChunkCnt: 1}
-	payload, _ := encode(msg, nil)
+	payload, _ := Encode(msg, nil)
 	pkt := echoRequestPacket(payload)
 
 	name, text, complete, dropped, err := l.handlePacket(net.ParseIP("127.0.0.1"), pkt)
@@ -63,7 +63,7 @@ func TestHandleEchoReplyDropped(t *testing.T) {
 func TestHandleWrongSourceDropped(t *testing.T) {
 	l := newTestListener(nil)
 	msg := &Message{Name: "eve", Text: "spoof", MsgID: 2, ChunkIdx: 0, ChunkCnt: 1}
-	payload, _ := encode(msg, nil)
+	payload, _ := Encode(msg, nil)
 	pkt := echoRequestPacket(payload)
 	_, _, complete, dropped, _ := l.handlePacket(net.ParseIP("10.0.0.9"), pkt)
 	if !dropped || complete {
@@ -90,7 +90,7 @@ func TestHandleChunkReassembly(t *testing.T) {
 		text += base
 	} // ~1720 bytes -> several chunks
 
-	chunks, cnt, err := chunkText(name, text, nil)
+	chunks, cnt, err := ChunkText(name, text, nil, 0)
 	if cnt < 2 {
 		t.Fatalf("expected multiple chunks, got %d", cnt)
 	}
@@ -101,7 +101,7 @@ func TestHandleChunkReassembly(t *testing.T) {
 	var received string
 	for i, c := range chunks {
 		cm := &Message{Name: name, Text: string(c), MsgID: msgID, ChunkIdx: uint8(i), ChunkCnt: cnt}
-		payload, _ := encode(cm, nil)
+		payload, _ := Encode(cm, nil)
 		pkt := echoRequestPacket(payload)
 		gotName, gotText, complete, dropped, err := l.handlePacket(net.ParseIP("127.0.0.1"), pkt)
 		if err != nil {
@@ -120,10 +120,10 @@ func TestHandleChunkReassembly(t *testing.T) {
 }
 
 func TestHandleEncryptedCorrectKey(t *testing.T) {
-	key := newKey("s3cret")
+	key := NewKey("s3cret")
 	l := newTestListener(key)
 	msg := &Message{Name: "carol", Text: "secret text", MsgID: 5, ChunkIdx: 0, ChunkCnt: 1}
-	payload, _ := encode(msg, key)
+	payload, _ := Encode(msg, key)
 	pkt := echoRequestPacket(payload)
 	name, text, complete, dropped, err := l.handlePacket(net.ParseIP("127.0.0.1"), pkt)
 	if err != nil {
@@ -135,9 +135,9 @@ func TestHandleEncryptedCorrectKey(t *testing.T) {
 }
 
 func TestHandleEncryptedWrongKeyDropped(t *testing.T) {
-	l := newTestListener(newKey("wrong"))
+	l := newTestListener(NewKey("wrong"))
 	msg := &Message{Name: "carol", Text: "secret text", MsgID: 6, ChunkIdx: 0, ChunkCnt: 1}
-	payload, _ := encode(msg, newKey("right"))
+	payload, _ := Encode(msg, NewKey("right"))
 	pkt := echoRequestPacket(payload)
 	_, _, complete, dropped, _ := l.handlePacket(net.ParseIP("127.0.0.1"), pkt)
 	if !dropped || complete {

@@ -20,7 +20,7 @@ encryption from the standard library.
 - **Long messages** — anything over ~1000 bytes is chunked and reassembled
   automatically.
 - **Optional relay** — a relay server enables one-to-many chat and decouples
-  peers (see [Roadmap](#roadmap)).
+  peers (see [Relay server](#relay-server)).
 
 ## Build
 
@@ -116,6 +116,50 @@ by the receiver in `chunkIdx` order.
 AES-256-GCM (stdlib `crypto/cipher`). Ciphertext that fails authentication (wrong
 key or tampering) is dropped silently.
 
+## Relay server
+
+Direct mode pairs two hosts one-to-one. The **relay** decouples peers so any
+number of clients can chat together in a room, and lets clients talk even when
+they cannot reach each other directly (firewalls, NAT, or asymmetric
+reachability). It is a separate binary built from `cmd/relay`.
+
+The relay needs a raw ICMP socket (root). Run it on a host both clients can ping:
+
+```sh
+sudo relay --addr 192.168.1.10
+```
+
+Clients then join a room through that relay:
+
+```sh
+# on each participant
+sudo icmpchat --relay 192.168.1.10 --name alice --room lobby
+```
+
+How it works:
+
+- Each client's outgoing chunk is wrapped in a small **visible relay header**
+  (`magic ver flags roomLen room`) in front of the (possibly encrypted) chat
+  payload. The header stays unencrypted so the relay can route without the key.
+- The relay parses the header, records the sender as a member of the room, and
+  forwards the original chat payload — re-wrapped in a fresh header — to every
+  *other* member of that room.
+- Delivery is still acknowledged by each member's kernel auto-reply, so the
+  relay never crafts replies. Members that go quiet are pruned after a
+  configurable TTL.
+
+Flags:
+
+| Flag          | Description                                          | Default         |
+| ------------- | ---------------------------------------------------- | --------------- |
+| `--addr`      | Relay's LAN IP that clients should use (`--relay`).  | auto-detected   |
+| `--ttl`       | Drop members inactive for longer than this.          | `60s`           |
+| `--prune-every` | How often to prune inactive members.               | `30s`           |
+| `--verbose`   | Log each forwarded message to stderr.                | `false`         |
+
+The client and relay share the wire-format, chunking, crypto, and socket logic
+under `internal/icmpchat`; the relay entrypoint is `cmd/relay`.
+
 ## Testing
 
 ```sh
@@ -129,6 +173,7 @@ Tests come in four levels:
 | Unit              | `proto_test.go`                                 | encode/decode, 5000-byte chunking, bad magic, truncation, wrong key | no |
 | Integration       | `integration_test.go`                           | full wire pipeline: encode → chunk → reassemble → decode, multi-message | no |
 | Socket pipeline   | `icmpio_test.go`, `listener_test.go`            | IP-header stripping, source filtering, echo-reply ignoring  | no (synthetic packets) |
+| Relay routing     | `cmd/relay/relay_test.go`                       | room membership, target selection, stale-member pruning      | no |
 | End-to-end        | `e2e_test.go`                                   | builds the real binary and runs it against 127.0.0.1        | sender only (unprivileged on macOS) |
 | Remote two-host   | `scripts/e2e_remote.sh`                         | real chat between two machines over the LAN                 | **yes** |
 
@@ -154,18 +199,21 @@ message in both directions and verifies each delivery.
 
 ## Project layout
 
-The client is a single flat `package main` for simplicity:
+The client is a thin `package main` over a shared protocol package:
 
 ```
 icmpchat/
 ├── main.go                 # client CLI (entrypoint)
-├── icmpio.go               # sender + listener socket helpers
-├── proto.go                # wire format, chunking, crypto, reassembly
-├── proto_test.go           # unit tests
-├── icmpio_test.go          # socket-pipeline tests (synthetic packets)
-├── listener_test.go        # listener packet-handling tests
-├── sender_test.go          # unprivileged loopback send test
-├── integration_test.go     # full wire-pipeline integration tests
+├── cmd/
+│   └── relay/              # relay server (one-to-many chat)
+│       ├── main.go
+│       └── relay_test.go
+├── internal/
+│   └── icmpchat/           # shared client+relay protocol/socket package
+│       ├── proto.go        # wire format, chunking, crypto, reassembly
+│       ├── icmpio.go       # sender + listener socket helpers
+│       ├── relay_proto_test.go
+│       └── (moved tests: proto, icmpio, listener, sender, integration)
 ├── e2e_test.go             # builds + runs the real binary
 ├── scripts/
 │   └── e2e_remote.sh       # two-host LAN test (needs sudo)
@@ -174,8 +222,9 @@ icmpchat/
 └── README.md
 ```
 
-The relay (Batch 2) will be split into `cmd/relay` and shared protocol/socket
-logic moved under `internal/` so the client and relay can share it.
+The client and the relay share the wire-format, chunking, crypto, and socket
+logic under `internal/icmpchat`; the client entrypoint stays at `main.go` and
+the relay server lives at `cmd/relay`.
 
 ## Branch strategy & CI
 
@@ -203,9 +252,8 @@ Work is merged to `dev`, validated, then merged to `main`.
 ## Roadmap
 
 - [x] Unprivileged sender + root listener, chunking, optional encryption
-- [x] Unprivileged sender + root listener, chunking, optional encryption
 - [x] Unit, integration, e2e, and remote two-host tests
 - [x] GitHub repo with `dev`/`main` branches and CI
 - [x] Split client/relay into `cmd/` + `internal/` packages
-- [ ] Relay server for one-to-many chat and peer decoupling
+- [x] Relay server for one-to-many chat and peer decoupling (built + unit-tested)
 - [ ] Full two-host e2e run with the relay (validated on macOS + Ubuntu)

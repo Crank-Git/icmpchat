@@ -1,4 +1,4 @@
-package main
+package icmpchat
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 
 func TestRoundTripCleartext(t *testing.T) {
 	m := &Message{Name: "alice", Text: "hello world", MsgID: 0x01020304, ChunkIdx: 0, ChunkCnt: 1}
-	payload, err := encode(m, nil)
+	payload, err := Encode(m, nil)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -29,7 +29,7 @@ func TestChunking5000Bytes(t *testing.T) {
 	for i := range text {
 		text[i] = byte(i % 251)
 	}
-	chunks, cnt, err := chunkText(name, string(text), nil)
+	chunks, cnt, err := ChunkText(name, string(text), nil, 0)
 	if err != nil {
 		t.Fatalf("chunkText: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestChunking5000Bytes(t *testing.T) {
 	var got string
 	for i, c := range chunks {
 		cm := &Message{Name: name, Text: string(c), MsgID: 42, ChunkIdx: uint8(i), ChunkCnt: uint8(len(chunks))}
-		payload, err := encode(cm, nil)
+		payload, err := Encode(cm, nil)
 		if err != nil {
 			t.Fatalf("encode chunk: %v", err)
 		}
@@ -64,13 +64,13 @@ func TestChunking5000Bytes(t *testing.T) {
 func TestChunkFitsWithinPayload(t *testing.T) {
 	name := "x"
 	text := make([]byte, 5000)
-	chunks, _, err := chunkText(name, string(text), nil)
+	chunks, _, err := ChunkText(name, string(text), nil, 0)
 	if err != nil {
 		t.Fatalf("chunkText: %v", err)
 	}
 	for i, c := range chunks {
 		cm := &Message{Name: name, Text: string(c), MsgID: 1, ChunkIdx: uint8(i), ChunkCnt: uint8(len(chunks))}
-		payload, err := encode(cm, nil)
+		payload, err := Encode(cm, nil)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -107,9 +107,9 @@ func TestTruncatedRejected(t *testing.T) {
 }
 
 func TestEncryptionRoundTrip(t *testing.T) {
-	key := newKey("correct horse")
+	key := NewKey("correct horse")
 	m := &Message{Name: "carol", Text: "secret payload", MsgID: 7, ChunkIdx: 0, ChunkCnt: 1}
-	payload, err := encode(m, key)
+	payload, err := Encode(m, key)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -126,27 +126,27 @@ func TestEncryptionRoundTrip(t *testing.T) {
 }
 
 func TestWrongKeyRejected(t *testing.T) {
-	payload, err := encode(&Message{Name: "d", Text: "e", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, newKey("right"))
+	payload, err := Encode(&Message{Name: "d", Text: "e", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, NewKey("right"))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	if _, err := decode(payload, newKey("wrong")); err == nil {
+	if _, err := decode(payload, NewKey("wrong")); err == nil {
 		t.Fatalf("expected wrong-key decode to fail")
 	}
 }
 
 func TestCleartextNotDecryptableWithKey(t *testing.T) {
 	// A cleartext packet must not decode as ciphertext.
-	payload, _ := encode(&Message{Name: "f", Text: "g", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, nil)
-	if _, err := decode(payload, newKey("x")); err == nil {
+	payload, _ := Encode(&Message{Name: "f", Text: "g", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, nil)
+	if _, err := decode(payload, NewKey("x")); err == nil {
 		t.Fatalf("expected cleartext to fail decode under key")
 	}
 }
 
 func TestNonceUniquePerEncode(t *testing.T) {
-	key := newKey("z")
-	a, _ := encode(&Message{Name: "h", Text: "i", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, key)
-	b, _ := encode(&Message{Name: "h", Text: "i", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, key)
+	key := NewKey("z")
+	a, _ := Encode(&Message{Name: "h", Text: "i", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, key)
+	b, _ := Encode(&Message{Name: "h", Text: "i", MsgID: 1, ChunkIdx: 0, ChunkCnt: 1}, key)
 	// Same header + nonce prefix, then ciphertext differs.
 	if bytes.Equal(a, b) {
 		t.Fatalf("two encodes produced identical payloads; nonce not random")
