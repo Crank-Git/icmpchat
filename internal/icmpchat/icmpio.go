@@ -239,7 +239,10 @@ func (l *Listener) ReadEchoRequest() (src net.IP, payload []byte, ok bool, err e
 // dropped is true for ignored/undecodable packets; err is non-nil only for
 // structural failures like a malformed IP header.
 func (l *Listener) handlePacket(src net.IP, pkt []byte) (name, text string, complete, dropped bool, err error) {
-	if src.String() != l.peer {
+	// In direct mode accept only the peer; in relay mode accept only the relay.
+	// l.peer is empty when relaying, so a bare `src != l.peer` would drop every
+	// relay-forwarded message — mirror ReadNext's filter here.
+	if src.String() != l.peer && (l.relay == "" || src.String() != l.relay) {
 		return "", "", false, true, nil
 	}
 	raw, err := stripIPHeader(pkt)

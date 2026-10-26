@@ -189,3 +189,45 @@ func TestParseEchoRequestRejectsEchoReplies(t *testing.T) {
 		t.Fatalf("garbage should be rejected")
 	}
 }
+
+// TestHandleRelayMessageAccepted is a regression test for a bug where
+// handlePacket dropped every relay-forwarded message: in relay mode l.peer is
+// empty, so the old `src != l.peer` check rejected all packets. Only the relay
+// (l.relay) should be accepted in this mode.
+func TestHandleRelayMessageAccepted(t *testing.T) {
+	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
+	chat := &Message{Name: "mac", Text: "hb2", MsgID: 3, ChunkIdx: 0, ChunkCnt: 1}
+	chatPayload, _ := Encode(chat, nil)
+	header, _ := BuildRelayHeader("demo")
+	wire := make([]byte, 0, len(header)+len(chatPayload))
+	wire = append(wire, header...)
+	wire = append(wire, chatPayload...)
+	pkt := echoRequestPacket(wire)
+	name, text, complete, dropped, err := l.handlePacket(net.ParseIP("192.168.1.215"), pkt)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if dropped || !complete || name != "mac" || text != "hb2" {
+		t.Fatalf("relay message dropped or wrong: name=%q text=%q complete=%v dropped=%v", name, text, complete, dropped)
+	}
+}
+
+// TestHandleRelayWrongSourceDropped ensures a relay-mode listener still drops
+// packets that do not arrive from the relay.
+func TestHandleRelayWrongSourceDropped(t *testing.T) {
+	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
+	chat := &Message{Name: "eve", Text: "spoof", MsgID: 4, ChunkIdx: 0, ChunkCnt: 1}
+	chatPayload, _ := Encode(chat, nil)
+	header, _ := BuildRelayHeader("demo")
+	wire := make([]byte, 0, len(header)+len(chatPayload))
+	wire = append(wire, header...)
+	wire = append(wire, chatPayload...)
+	pkt := echoRequestPacket(wire)
+	_, _, _, dropped, err := l.handlePacket(net.ParseIP("10.0.0.9"), pkt)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !dropped {
+		t.Fatalf("packet from non-relay source should be dropped in relay mode")
+	}
+}
