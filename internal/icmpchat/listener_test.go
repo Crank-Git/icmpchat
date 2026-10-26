@@ -1,6 +1,7 @@
 package icmpchat
 
 import (
+	"bytes"
 	"net"
 	"testing"
 )
@@ -142,5 +143,49 @@ func TestHandleEncryptedWrongKeyDropped(t *testing.T) {
 	_, _, complete, dropped, _ := l.handlePacket(net.ParseIP("127.0.0.1"), pkt)
 	if !dropped || complete {
 		t.Fatalf("wrong-key ciphertext should be dropped")
+	}
+}
+
+// echoRequestRaw builds the ICMP bytes for an echo request (type 8) as the
+// kernel delivers them after the IPv4 header is stripped: type, code, checksum,
+// identifier, sequence, then data. The checksum is left zero, which ParseMessage
+// does not verify.
+func echoRequestRaw(data []byte) []byte {
+	b := make([]byte, 8+len(data))
+	b[0] = 8 // echo request
+	copy(b[8:], data)
+	return b
+}
+
+// echoReplyRaw builds the ICMP bytes for an echo reply (type 0).
+func echoReplyRaw(data []byte) []byte {
+	b := make([]byte, 8+len(data))
+	b[0] = 0 // echo reply
+	copy(b[8:], data)
+	return b
+}
+
+// TestParseEchoRequestRejectsEchoReplies is the regression test for a relay
+// forwarding loop: parseEchoRequest must accept echo requests (type 8) but
+// reject echo replies (type 0), which are the kernel's auto-acks of our own
+// forwards. Accepting replies let the relay re-forward its own output forever.
+func TestParseEchoRequestRejectsEchoReplies(t *testing.T) {
+	req := echoRequestRaw([]byte("ICHT\x01\x00\x00\x00\x00\x00\x00\x00hi"))
+	payload, ok := parseEchoRequest(req)
+	if !ok {
+		t.Fatalf("echo request rejected")
+	}
+	if !bytes.HasPrefix(payload, []byte("ICHT")) {
+		t.Fatalf("payload = %q, want it to start with ICHT magic", payload)
+	}
+
+	// An echo reply must be rejected (this is what previously looped).
+	if _, ok := parseEchoRequest(echoReplyRaw([]byte("ICHT\x01\x00\x00\x00\x00\x00\x00\x00hi"))); ok {
+		t.Fatalf("echo reply should be rejected")
+	}
+
+	// Garbage / non-ICMP bytes must be rejected too.
+	if _, ok := parseEchoRequest([]byte{0xff, 0xff, 0xff}); ok {
+		t.Fatalf("garbage should be rejected")
 	}
 }

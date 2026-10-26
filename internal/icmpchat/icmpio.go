@@ -225,15 +225,13 @@ func (l *Listener) ReadEchoRequest() (src net.IP, payload []byte, ok bool, err e
 	if err != nil {
 		return nil, nil, false, nil
 	}
-	rm, err := icmp.ParseMessage(1, raw)
-	if err != nil {
-		return nil, nil, false, nil
-	}
-	e, ok := rm.Body.(*icmp.Echo)
+	payload, ok = parseEchoRequest(raw)
 	if !ok {
+		// Ignore echo replies (type 0) and anything else; the relay must not
+		// re-forward the kernel's auto-acks of its own forwards.
 		return nil, nil, false, nil
 	}
-	return ipAddr.IP, e.Data, true, nil
+	return ipAddr.IP, payload, true, nil
 }
 
 // handlePacket processes one raw IPv4/ICMP packet. It returns (name, text,
@@ -248,29 +246,41 @@ func (l *Listener) handlePacket(src net.IP, pkt []byte) (name, text string, comp
 	if err != nil {
 		return "", "", false, true, err
 	}
-	rm, err := icmp.ParseMessage(1, raw)
-	if err != nil {
-		return "", "", false, true, err
-	}
-	// Only echo requests (type 8) carry our messages; ignore echo replies and
-	// everything else.
-	if rm.Type != ipv4.ICMPTypeEcho {
-		return "", "", false, true, nil
-	}
-	e, ok := rm.Body.(*icmp.Echo)
+	eData, ok := parseEchoRequest(raw)
 	if !ok {
+		// Only echo requests (type 8) carry our messages; ignore echo replies
+		// (type 0) and everything else.
 		return "", "", false, true, nil
 	}
 	// Relay messages carry a visible routing header in front of the chat
 	// payload; strip it so decode sees the plain ICHT message (which may itself
 	// be encrypted with the caller's key).
-	chatPayload, _ := splitRelay(e.Data)
+	chatPayload, _ := splitRelay(eData)
 	msg, err := decode(chatPayload, l.key)
 	if err != nil {
 		return "", "", false, true, nil
 	}
 	text, complete = l.reasm.Add(msg)
 	return msg.Name, text, complete, false, nil
+}
+
+// parseEchoRequest validates a raw ICMP payload (IPv4 header already stripped)
+// and returns the echo request data. ok is false for echo replies (type 0) and
+// any non-echo or malformed message, so callers can loop past them. This is the
+// shared guard that keeps the relay from re-forwarding its own auto-acks.
+func parseEchoRequest(raw []byte) (payload []byte, ok bool) {
+	rm, err := icmp.ParseMessage(1, raw)
+	if err != nil {
+		return nil, false
+	}
+	if rm.Type != ipv4.ICMPTypeEcho {
+		return nil, false
+	}
+	e, ok := rm.Body.(*icmp.Echo)
+	if !ok {
+		return nil, false
+	}
+	return e.Data, true
 }
 
 // stripIPHeader removes the leading IPv4 header when present. The header's
