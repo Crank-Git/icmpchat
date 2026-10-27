@@ -20,7 +20,8 @@ encryption from the standard library.
 - **Long messages** — anything over ~1000 bytes is chunked and reassembled
   automatically.
 - **Optional relay** — a relay server enables one-to-many chat and decouples
-  peers (see [Relay server](#relay-server)).
+  peers (see [Relay server](#relay-server)). Relay delivery also works on macOS,
+  where direct mode cannot receive — see [Relay server](#relay-server).
 
 ## Build
 
@@ -77,6 +78,11 @@ sudo icmpchat --peer 192.168.1.133 --name bob
 > macOS blocks incoming echo requests behind the firewall by default. Allow
 > incoming requests in *System Settings → Network → Firewall → Options* (or
 > disable the firewall) so the raw listener sees peers' echo requests.
+>
+> This holds at the kernel level too: the macOS kernel answers echo requests
+> itself and never passes them to raw sockets. For chat that must work on macOS,
+> use relay mode, which delivers messages as echo *replies* instead — see
+> [Relay server](#relay-server).
 
 ## How it works
 
@@ -142,11 +148,23 @@ How it works:
   (`magic ver flags roomLen room`) in front of the (possibly encrypted) chat
   payload. The header stays unencrypted so the relay can route without the key.
 - The relay parses the header, records the sender as a member of the room, and
-  forwards the original chat payload — re-wrapped in a fresh header — to every
-  *other* member of that room.
-- Delivery is still acknowledged by each member's kernel auto-reply, so the
-  relay never crafts replies. Members that go quiet are pruned after a
-  configurable TTL.
+  queues the chat payload for every *other* member of that room.
+- Members **pull** their messages by polling the relay. Each client sends a
+  short poll — an ICMP echo request carrying only the relay header with the
+  poll flag set — about once a second. A poll is both a keepalive (it refreshes
+  the member's TTL) and a request to drain anything queued since the last poll.
+- The relay drains each member's queue and delivers the messages as ICMP echo
+  **replies** (type 0), re-wrapped in a relay header with the deliver flag set
+  and copied from the poll's ICMP id/seq. Queued messages go out oldest first,
+  and each is delivered exactly once. The relay never crafts echo requests; it
+  only answers a poll with a queued message.
+- Members that go quiet are pruned after a configurable TTL.
+
+This pull model is what makes relay mode work on macOS. The kernel answers echo
+requests itself and never passes them to raw sockets, so a macOS client cannot
+receive relay chat as echo requests. Echo **replies** (type 0), however, do reach
+macOS raw sockets, so the relay delivers queued messages that way. Direct
+`--peer` mode is unchanged and keeps the same macOS receive limitation.
 
 Flags:
 
@@ -155,7 +173,15 @@ Flags:
 | `--addr`      | Relay's LAN IP that clients should use (`--relay`).  | auto-detected   |
 | `--ttl`       | Drop members inactive for longer than this.          | `60s`           |
 | `--prune-every` | How often to prune inactive members.               | `30s`           |
-| `--verbose`   | Log each forwarded message to stderr.                | `false`         |
+| `--verbose`   | Log received packets, poll drains, and deliveries.   | `false`         |
+
+Relay wire flags (the `flags` byte after `ver`):
+
+| Flag     | Direction        | Meaning                                            |
+| -------- | ---------------- | -------------------------------------------------- |
+| `0x01`   | message          | payload carries a visible relay routing header     |
+| `0x02`   | client → relay   | echo request is a poll (relay header only)         |
+| `0x04`   | relay → client   | echo reply carries a queued message                |
 
 The client and relay share the wire-format, chunking, crypto, and socket logic
 under `internal/icmpchat`; the relay entrypoint is `cmd/relay`.
@@ -256,4 +282,5 @@ Work is merged to `dev`, validated, then merged to `main`.
 - [x] GitHub repo with `dev`/`main` branches and CI
 - [x] Split client/relay into `cmd/` + `internal/` packages
 - [x] Relay server for one-to-many chat and peer decoupling (built + unit-tested)
+- [x] Poll-based relay delivery so relay chat works on macOS (pull model; delivered as echo replies)
 - [ ] Full two-host e2e run with the relay (validated on macOS + Ubuntu)
