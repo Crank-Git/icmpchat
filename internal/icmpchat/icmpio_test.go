@@ -50,3 +50,32 @@ func TestStripIPHeaderRejects(t *testing.T) {
 		t.Fatalf("expected error for bogus IHL")
 	}
 }
+
+// TestStripIPHeaderShortHeaderless ensures a headerless ICMP message shorter
+// than a full IPv4 header is passed through, not rejected. Kernels deliver raw
+// ICMP to ip4:icmp sockets without the leading IPv4 header, and a relay poll is
+// only 19 bytes (8-byte ICMP header + 11-byte relay header); the old code's
+// `len < 20` guard dropped it before the version nibble could be checked.
+func TestStripIPHeaderShortHeaderless(t *testing.T) {
+	// 8-byte ICMP echo-request header (type 0x08) + 11-byte relay poll header:
+	// 49 43 48 54 ("ICHT") 01 (ver) 03 (relay|poll flags) 04 (room len) 64 ("d").
+	poll := []byte{0x08, 0x00, 0x8c, 0x7d, 0x00, 0x15, 0x00, 0x01, 0x49, 0x43, 0x48, 0x54, 0x01, 0x03, 0x04, 0x64}
+	got, err := stripIPHeader(poll)
+	if err != nil {
+		t.Fatalf("stripIPHeader short headerless: %v", err)
+	}
+	if !bytes.Equal(got, poll) {
+		t.Fatalf("stripped = %x, want %x", got, poll)
+	}
+
+	// The very shortest headerless ICMP echo request is an 8-byte header with no
+	// data; it must also pass through rather than being dropped as too short.
+	echo := []byte{0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+	got, err = stripIPHeader(echo)
+	if err != nil {
+		t.Fatalf("stripIPHeader 8-byte headerless: %v", err)
+	}
+	if len(got) != len(echo) {
+		t.Fatalf("stripped len = %d, want %d", len(got), len(echo))
+	}
+}

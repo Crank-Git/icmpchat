@@ -376,9 +376,12 @@ func parseEchoRequest(raw []byte) (payload []byte, ok bool) {
 // length (IHL, in 32-bit words) is in the first byte. Most kernels deliver the
 // ICMP message preceded by the IPv4 header (first byte 0x45), but some hosts
 // deliver the raw ICMP message without it (first byte is the ICMP type, e.g.
-// 0x00). The version nibble distinguishes the two: only strip when it is 4.
+// 0x08). The version nibble distinguishes the two: only strip when it is 4.
+// The nibble is checked before the length guard so a headerless ICMP message
+// shorter than a 20-byte IPv4 header -- such as a 19-byte relay poll -- is
+// passed through rather than wrongly rejected as shorter than an IP header.
 func stripIPHeader(b []byte) ([]byte, error) {
-	if len(b) < 20 {
+	if len(b) == 0 {
 		return nil, errShortPacket
 	}
 	if b[0]>>4 != 4 {
