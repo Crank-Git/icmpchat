@@ -123,14 +123,19 @@ func pollLoop(sender *icmpchat.Sender, pollPayload []byte) {
 	// Poll immediately so the room joins without waiting for the first tick, then
 	// keep polling to stay registered and drain queued messages.
 	if !sender.SendPoll(pollPayload) {
-		// The initial poll failed; the ticker retries.
+		fmt.Fprintf(os.Stderr, "icmpchat: initial poll failed\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "icmpchat: initial poll sent\n")
 	}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
+	count := 0
 	for range ticker.C {
+		count++
 		if !sender.SendPoll(pollPayload) {
-			// A failed poll just means the relay is unreachable; the next tick
-			// retries. There is nothing else to do.
+			fmt.Fprintf(os.Stderr, "icmpchat: poll failed\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "icmpchat: poll #%d sent\n", count)
 		}
 	}
 }

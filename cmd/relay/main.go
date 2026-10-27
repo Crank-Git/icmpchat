@@ -57,6 +57,17 @@ func main() {
 		if err != nil || !ok {
 			continue
 		}
+		if *verbose {
+			flags := byte(0)
+			if len(payload) > 5 {
+				flags = payload[5]
+			}
+			h := ""
+			if len(payload) >= 6 {
+				h = string(payload[0:6])
+			}
+			fmt.Fprintf(os.Stderr, "relay: recv src=%s len=%d flags=0x%02x first=%q\n", src, len(payload), flags, h)
+		}
 		res := r.route(src.String(), payload)
 		if res.room == "" {
 			continue
@@ -168,6 +179,9 @@ func (r *rooms) drain(room, ip string) [][]byte {
 // those that cannot receive echo requests (such as macOS).
 func (r *rooms) deliverPoll(l *icmpchat.Listener, src, room string, id, seq int, verbose bool) {
 	msgs := r.drain(room, src)
+	if verbose {
+		fmt.Fprintf(os.Stderr, "relay: poll from %s (room %q) delivered %d message(s)\n", src, room, len(msgs))
+	}
 	for _, cp := range msgs {
 		header, err := icmpchat.BuildDeliverHeader(room)
 		if err != nil {
