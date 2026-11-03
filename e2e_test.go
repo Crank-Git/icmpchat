@@ -106,6 +106,39 @@ func TestE2EUsageNoPeer(t *testing.T) {
 	}
 }
 
+// TestPartialSendNotice checks the message shown when a multi-chunk send aborts
+// mid-message. A single-chunk failure, or one where nothing was delivered, falls
+// back to the plain "no reply" (empty notice); a partial multi-chunk failure
+// names how many of how many chunks landed.
+func TestPartialSendNotice(t *testing.T) {
+	cases := []struct {
+		delivered, total int
+		wantNotice       bool
+		wantSubstr       string
+	}{
+		{0, 1, false, ""},      // single chunk, nothing delivered
+		{1, 1, false, ""},      // single chunk accounting
+		{0, 3, false, ""},      // first chunk failed; no partial delivery yet
+		{1, 3, true, "1 of 3"}, // one chunk landed, rest did not
+		{2, 3, true, "2 of 3"}, // partial multi-chunk
+		{3, 3, false, ""},      // all delivered: not a failure
+	}
+	for _, c := range cases {
+		got := partialSendNotice(c.delivered, c.total)
+		if c.wantNotice {
+			if got == "" {
+				t.Errorf("partialSendNotice(%d,%d) = \"\", want a notice", c.delivered, c.total)
+				continue
+			}
+			if !strings.Contains(got, c.wantSubstr) {
+				t.Errorf("partialSendNotice(%d,%d) = %q, want it to contain %q", c.delivered, c.total, got, c.wantSubstr)
+			}
+		} else if got != "" {
+			t.Errorf("partialSendNotice(%d,%d) = %q, want \"\"", c.delivered, c.total, got)
+		}
+	}
+}
+
 // TestE2EPeerRelayMutualExclusion verifies that passing both --peer and --relay
 // is rejected with a clear error and a non-zero exit, before any socket is
 // opened. Running both at once would take the direct receive path and silently

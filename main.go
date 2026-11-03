@@ -222,10 +222,29 @@ func sendLine(line, name string, key []byte, sender *icmpchat.Sender, relay, roo
 		if sender.Send(payload) {
 			fmt.Println("✓")
 		} else {
-			fmt.Println("✗ (no reply)")
+			// i chunks (0..i-1) were acknowledged before this one failed. For a
+			// multi-chunk message that means the peer is left holding an
+			// incomplete message, so say so rather than a bare "no reply".
+			if notice := partialSendNotice(i, int(cnt)); notice != "" {
+				fmt.Println(notice)
+			} else {
+				fmt.Println("✗ (no reply)")
+			}
 			return
 		}
 	}
+}
+
+// partialSendNotice returns the message shown when a multi-chunk send aborts
+// after some chunks were already delivered. delivered is the number of chunks
+// acknowledged before the failure; total is the message's chunk count. It
+// returns "" for a single-chunk message or when nothing was delivered, so the
+// caller falls back to the plain "no reply".
+func partialSendNotice(delivered, total int) string {
+	if total <= 1 || delivered <= 0 || delivered >= total {
+		return ""
+	}
+	return fmt.Sprintf("✗ (partial send: %d of %d chunks delivered; peer may see an incomplete message)", delivered, total)
 }
 
 // sendTarget returns the destination IP for outgoing packets: the relay when

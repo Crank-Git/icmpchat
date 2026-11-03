@@ -368,19 +368,37 @@ func ChunkText(name, text string, key []byte, overhead int) ([][]byte, uint8, er
 	return chunks, uint8(len(chunks)), nil
 }
 
+// fragmentTTL bounds how long an incomplete message is held. ICMP is lossy, so
+// a dropped chunk would otherwise pin a fragment in the map forever; after this
+// idle span the partial message is evicted rather than leaked.
+const fragmentTTL = 30 * time.Second
+
 // reassembler collects message chunks keyed by MsgID.
 type reassembler struct {
 	frags map[uint32]*fragment
+	ttl   time.Duration
+	now   func() time.Time // injectable clock; defaults to time.Now
 }
 
 type fragment struct {
 	chunkCnt uint8
 	name     string
 	chunks   map[uint8]string
+	updated  time.Time // last time a chunk for this message arrived
 }
 
 func newReassembler() *reassembler {
-	return &reassembler{frags: map[uint32]*fragment{}}
+	return &reassembler{frags: map[uint32]*fragment{}, ttl: fragmentTTL, now: time.Now}
+}
+
+// evictStale drops incomplete fragments that have not received a chunk within
+// the TTL, so a lost chunk cannot pin memory for the life of the process.
+func (rs *reassembler) evictStale(now time.Time) {
+	for id, f := range rs.frags {
+		if now.Sub(f.updated) > rs.ttl {
+			delete(rs.frags, id)
+		}
+	}
 }
 
 // Add records one chunk and returns (text, complete); complete is true only
@@ -389,6 +407,8 @@ func (rs *reassembler) Add(m *Message) (string, bool) {
 	if m.ChunkCnt == 0 {
 		return "", false
 	}
+	now := rs.now()
+	rs.evictStale(now)
 	f := rs.frags[m.MsgID]
 	if f == nil {
 		f = &fragment{chunkCnt: m.ChunkCnt, name: m.Name, chunks: map[uint8]string{}}
@@ -399,6 +419,7 @@ func (rs *reassembler) Add(m *Message) (string, bool) {
 		return "", false
 	}
 	f.name = m.Name
+	f.updated = now
 	f.chunks[m.ChunkIdx] = m.Text
 	if len(f.chunks) != int(f.chunkCnt) {
 		return "", false
