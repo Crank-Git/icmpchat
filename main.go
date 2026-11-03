@@ -22,10 +22,15 @@ func main() {
 	keyPass := flag.String("key", "", "optional passphrase for payload encryption")
 	relay := flag.String("relay", "", "relay server IP; when set, messages are routed through it for one-to-many chat")
 	room := flag.String("room", "lobby", "chat room to join when relaying")
+	verbose := flag.Bool("verbose", false, "log poll keepalive activity to stderr (relay mode)")
 	flag.Parse()
 
 	if *peer == "" && *relay == "" {
 		fmt.Fprintln(os.Stderr, "usage: icmpchat [--peer <ip> | --relay <ip>] [--name <nick>] [--room <name>] [--key <passphrase>]")
+		os.Exit(2)
+	}
+	if *peer != "" && *relay != "" {
+		fmt.Fprintln(os.Stderr, "icmpchat: --peer and --relay are mutually exclusive; pass only one")
 		os.Exit(2)
 	}
 
@@ -76,7 +81,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "cannot build poll header: %v\n", err)
 			os.Exit(1)
 		}
-		go pollLoop(sender, pollPayload)
+		go pollLoop(sender, pollPayload, *verbose)
 	}
 	if *relay != "" {
 		fmt.Printf("icmpchat: chatting as %q via relay %s, room %q\n", *name, *relay, relayRoom)
@@ -119,12 +124,14 @@ const pollInterval = time.Second
 // pull-based delivery: the relay queues messages for a member and hands them
 // out as echo replies on the member's next poll, which is how clients that
 // cannot receive echo requests (such as macOS) get their messages.
-func pollLoop(sender *icmpchat.Sender, pollPayload []byte) {
+func pollLoop(sender *icmpchat.Sender, pollPayload []byte, verbose bool) {
 	// Poll immediately so the room joins without waiting for the first tick, then
-	// keep polling to stay registered and drain queued messages.
+	// keep polling to stay registered and drain queued messages. Poll health is
+	// logged only under --verbose, matching the relay; a quiet default run does
+	// not scroll the chat with a line every second.
 	if !sender.SendPoll(pollPayload) {
 		fmt.Fprintf(os.Stderr, "icmpchat: initial poll failed\n")
-	} else {
+	} else if verbose {
 		fmt.Fprintf(os.Stderr, "icmpchat: initial poll sent\n")
 	}
 	ticker := time.NewTicker(pollInterval)
@@ -133,8 +140,10 @@ func pollLoop(sender *icmpchat.Sender, pollPayload []byte) {
 	for range ticker.C {
 		count++
 		if !sender.SendPoll(pollPayload) {
-			fmt.Fprintf(os.Stderr, "icmpchat: poll failed\n")
-		} else {
+			if verbose {
+				fmt.Fprintf(os.Stderr, "icmpchat: poll #%d failed\n", count)
+			}
+		} else if verbose {
 			fmt.Fprintf(os.Stderr, "icmpchat: poll #%d sent\n", count)
 		}
 	}
@@ -213,10 +222,29 @@ func sendLine(line, name string, key []byte, sender *icmpchat.Sender, relay, roo
 		if sender.Send(payload) {
 			fmt.Println("✓")
 		} else {
-			fmt.Println("✗ (no reply)")
+			// i chunks (0..i-1) were acknowledged before this one failed. For a
+			// multi-chunk message that means the peer is left holding an
+			// incomplete message, so say so rather than a bare "no reply".
+			if notice := partialSendNotice(i, int(cnt)); notice != "" {
+				fmt.Println(notice)
+			} else {
+				fmt.Println("✗ (no reply)")
+			}
 			return
 		}
 	}
+}
+
+// partialSendNotice returns the message shown when a multi-chunk send aborts
+// after some chunks were already delivered. delivered is the number of chunks
+// acknowledged before the failure; total is the message's chunk count. It
+// returns "" for a single-chunk message or when nothing was delivered, so the
+// caller falls back to the plain "no reply".
+func partialSendNotice(delivered, total int) string {
+	if total <= 1 || delivered <= 0 || delivered >= total {
+		return ""
+	}
+	return fmt.Sprintf("✗ (partial send: %d of %d chunks delivered; peer may see an incomplete message)", delivered, total)
 }
 
 // sendTarget returns the destination IP for outgoing packets: the relay when
