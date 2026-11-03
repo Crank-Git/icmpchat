@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildBinary compiles the icmpchat binary into a temp dir.
@@ -102,5 +103,82 @@ func TestE2EUsageNoPeer(t *testing.T) {
 	out := runClient(t, bin, "", "", "")
 	if !strings.Contains(out, "usage:") {
 		t.Fatalf("expected usage message, got:\n%s", out)
+	}
+}
+
+// TestE2EPeerRelayMutualExclusion verifies that passing both --peer and --relay
+// is rejected with a clear error and a non-zero exit, before any socket is
+// opened. Running both at once would take the direct receive path and silently
+// drop every relay delivery, so the combination must not be allowed.
+func TestE2EPeerRelayMutualExclusion(t *testing.T) {
+	bin := buildBinary(t)
+	cmd := exec.Command(bin, "--peer", "127.0.0.1", "--relay", "127.0.0.1")
+	cmd.Stdin = bytes.NewReader(nil)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit for --peer with --relay, got success:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "mutually exclusive") {
+		t.Fatalf("expected a mutual-exclusion error, got:\n%s", out.String())
+	}
+}
+
+// runRelayClientFor runs the binary in relay mode with the given extra args,
+// holds its stdin open for dur so the poll loop ticks at least once, then sends
+// EOF to let it exit cleanly and returns combined output. Relay mode otherwise
+// loops forever polling, so a bounded run is how its stderr is observed.
+func runRelayClientFor(t *testing.T, bin string, dur time.Duration, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(bin, args...)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting icmpchat: %v", err)
+	}
+	time.Sleep(dur)
+	stdin.Close() // EOF ends the input loop, so main returns cleanly.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		_ = cmd.Process.Kill()
+		<-done
+	}
+	return out.String()
+}
+
+// TestE2EPollLoggingGatedByVerbose verifies that relay-mode poll keepalive
+// logging is silent by default and only appears under --verbose. The default
+// run must not scroll the chat with a line every second.
+func TestE2EPollLoggingGatedByVerbose(t *testing.T) {
+	if runtime.GOOS == "linux" && os.Getuid() != 0 {
+		t.Skip("relay sender socket needs root on Linux; run with sudo for a full e2e")
+	}
+	bin := buildBinary(t)
+
+	// pollInterval is one second; 1.5s guarantees at least one tick.
+	quiet := runRelayClientFor(t, bin, 1500*time.Millisecond, "--relay", "127.0.0.1", "--name", "q")
+	if strings.Contains(quiet, "cannot open sender socket") {
+		t.Skip("ICMP sender socket unavailable in this environment")
+	}
+	if strings.Contains(quiet, "poll #") || strings.Contains(quiet, "initial poll sent") {
+		t.Fatalf("default run must not log poll activity, got:\n%s", quiet)
+	}
+
+	loud := runRelayClientFor(t, bin, 1500*time.Millisecond, "--relay", "127.0.0.1", "--name", "v", "--verbose")
+	if strings.Contains(loud, "cannot open sender socket") {
+		t.Skip("ICMP sender socket unavailable in this environment")
+	}
+	if !strings.Contains(loud, "poll #1 sent") {
+		t.Fatalf("verbose run must log poll ticks, got:\n%s", loud)
 	}
 }
