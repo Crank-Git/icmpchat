@@ -283,4 +283,4 @@ Work is merged to `dev`, validated, then merged to `main`.
 - [x] Split client/relay into `cmd/` + `internal/` packages
 - [x] Relay server for one-to-many chat and peer decoupling (built + unit-tested)
 - [x] Poll-based relay delivery so relay chat works on macOS (pull model; delivered as echo replies)
-- [ ] Full two-host e2e run with the relay (validated on macOS + Ubuntu)
+- [x] Full multi-host e2e run with the relay (validated over the LAN: relay on Linux, with a macOS client and a Linux client chatting both directions)
