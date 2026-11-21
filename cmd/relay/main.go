@@ -6,11 +6,11 @@
 //
 // The relay needs a raw ICMP socket, so run it with sudo:
 //
-//	sudo relay --addr 192.168.1.10
+//	sudo relay --addr 192.0.2.1
 //
 // Clients then run:
 //
-//	icmpchat --relay 192.168.1.10 --name alice
+//	icmpchat --relay 192.0.2.1 --name alice
 package main
 
 import (
