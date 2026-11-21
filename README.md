@@ -1,286 +1,168 @@
-# icmpchat
+<p align="center">
+  <img src="assets/brand/banner.svg" alt="icmpchat: a terminal running icmpchat --peer 127.0.0.1 --name alice, which prints that alice is chatting with payload encryption off, sends &quot;hi there&quot; and gets a check mark when the echo reply arrives." width="100%">
+</p>
 
-Terminal chat whose messages travel inside the payload of **ICMP Echo Request**
-packets. Type at a `> ` prompt; your text is carried in an ICMP echo, delivered
-to the peer, and acknowledged by the kernel's echo reply.
+<p align="center"><b>Terminal chat whose messages travel inside ICMP echo requests.</b> The peer's kernel echo reply is the delivery receipt, and AES-256-GCM is optional.</p>
 
-Single Go binary, one dependency group (`golang.org/x/net`), optional AES-256-GCM
-encryption from the standard library.
+<p align="center">
+  <a href="https://github.com/Crank-Git/icmpchat/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/Crank-Git/icmpchat/ci.yml?branch=main&style=flat-square&label=ci&labelColor=30363d"></a>
+  <a href="https://github.com/Crank-Git/icmpchat/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Crank-Git/icmpchat?style=flat-square&labelColor=30363d&color=7ee787"></a>
+  <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/Crank-Git/icmpchat?style=flat-square&label=go&labelColor=30363d&color=7ee787">
+  <img alt="Platform: Linux and macOS" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS-7ee787?style=flat-square&labelColor=30363d">
+</p>
 
-[![CI](https://github.com/Crank-Git/icmpchat/actions/workflows/ci.yml/badge.svg)](https://github.com/Crank-Git/icmpchat/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/go-1.26-00add8.svg)](go.mod)
+<p align="center">
+  <a href="docs/protocol.md"><b>Docs</b></a> ·
+  <a href="#install"><b>Install</b></a> ·
+  <a href="#quick-start"><b>Quick start</b></a> ·
+  <a href="https://github.com/Crank-Git/icmpchat/releases"><b>Releases</b></a>
+</p>
 
-## Features
+```mermaid
+flowchart LR
+  A[alice: icmpchat] -->|echo request, ICHT payload| K[bob's kernel]
+  K -->|echo reply, printed as ✓| A
+  K --> B[bob: raw ICMP listener]
+```
 
-- **Zero-agent transport** — chat over plain ICMP echo; nothing to run on the peer.
-- **Unprivileged send** — the sender uses a `SOCK_DGRAM` ICMP socket and needs no root.
-- **Free delivery ack** — the kernel's echo reply doubles as a delivery
-  confirmation; the sender prints `✓` or `✗ (no reply)`.
-- **Optional encryption** — `--key` seals payloads with AES-256-GCM.
-- **Long messages** — anything over ~1000 bytes is chunked and reassembled
-  automatically.
-- **Optional relay** — a relay server enables one-to-many chat and decouples
-  peers (see [Relay server](#relay-server)). Relay delivery also works on macOS,
-  where direct mode cannot receive — see [Relay server](#relay-server).
+## Why icmpchat
 
-## Build
+An echo request has a payload, and almost nobody looks at it. icmpchat puts the chat message there: you type at a `> ` prompt, the text rides an ICMP echo request to your peer, and their listener prints it.
+
+The part I like is the acknowledgment. The peer's kernel answers every echo request on its own, so the reply that comes back is a free delivery receipt. The sender prints `✓` when it arrives and `✗ (no reply)` when it doesn't. Nobody crafts a reply by hand.
+
+From there I added chunking for long messages, an optional `--key` for AES-256-GCM, and a relay for rooms with more than two people. The relay is also what gets macOS working, since the macOS kernel keeps incoming echo requests to itself.
+
+## Requirements
+
+- **Root to receive.** The listener needs a raw `ip4:icmp` socket. Without root, icmpchat says so and runs send-only.
+- **Sending without root** works on macOS and on Linux hosts that allow unprivileged ICMP (`SOCK_DGRAM`) sockets. Otherwise the sender falls back to a raw socket, which needs root too.
+- **ICMP between the hosts.** Many networks rate-limit or drop it.
+- **macOS:** allow incoming requests in *System Settings → Network → Firewall → Options*, and use [relay mode](#relay) to receive.
+- **Go 1.26.5 or later**, only if you build from source.
+
+## Install
+
+Grab a binary from [Releases](https://github.com/Crank-Git/icmpchat/releases): `icmpchat` for `darwin_arm64`, `linux_amd64` and `linux_arm64`, the relay for `linux_amd64` and `linux_arm64`, plus `SHA256SUMS`.
+
+From source:
 
 ```sh
+git clone https://github.com/Crank-Git/icmpchat.git
+cd icmpchat
 go build -o icmpchat .
+go build -o relay ./cmd/relay
 ```
 
-## Usage
+`go install` won't work. The module path is just `icmpchat`, which the Go module proxy can't fetch.
+
+## Quick start
+
+Try the sender on loopback first. On macOS this needs no root:
 
 ```sh
-icmpchat --peer <ip> [--name <nick>] [--key <passphrase>]
+icmpchat --peer 127.0.0.1 --name alice
 ```
 
-| Flag       | Description                                        | Default  |
-| ---------- | -------------------------------------------------- | -------- |
-| `--peer`   | Peer IP address (required).                        | —        |
-| `--name`   | Your display name.                                 | `anon`   |
-| `--key`    | Optional passphrase; enables AES-256-GCM encryption. | —      |
+Type `hi there` and press Enter. Your kernel answers the echo request, so you get a `✓`. You'll also see `running in send-only mode; enable receiving with sudo.`, which is normal without root.
+
+To chat between two hosts, run each side as root and point it at the other:
 
 ```sh
-$ icmpchat --peer 192.0.2.10 --name alice
+# on host A (192.0.2.20)
+sudo icmpchat --peer 192.0.2.10 --name alice
+# on host B (192.0.2.10)
+sudo icmpchat --peer 192.0.2.20 --name bob
+```
+
+```
+$ sudo icmpchat --peer 192.0.2.10 --name alice
 icmpchat: chatting as "alice", peer 192.0.2.10
 payload encryption: off
 > hi there
 ✓
 ```
 
-Incoming messages print on their own line above the prompt:
+Incoming messages print on their own line above the prompt, with the local time:
 
 ```
-[14:03:07] bob: on you
+14:03:07 bob: on you
 ```
 
-### Receiving requires root
+Add `--key <passphrase>` on both sides to encrypt. A message sealed with the wrong key is dropped without a word, so if nothing shows up, check the passphrase first.
 
-The **receiving** side listens for incoming echo requests on a raw ICMP socket,
-which needs root. Run without sudo and icmpchat prints a clear message and
-continues in **send-only** mode:
-
-```
-receiving needs root: run with sudo (could not open raw ICMP socket: ...: operation not permitted)
-running in send-only mode; enable receiving with sudo.
-```
-
-To chat between two hosts, each side runs its receiver as root:
+## Usage
 
 ```sh
-# on host A
-sudo icmpchat --peer 192.168.1.221 --name alice
-# on host B
-sudo icmpchat --peer 192.168.1.133 --name bob
+icmpchat [--peer <ip> | --relay <ip>] [--name <nick>] [--room <name>] [--key <passphrase>]
 ```
 
-> macOS blocks incoming echo requests behind the firewall by default. Allow
-> incoming requests in *System Settings → Network → Firewall → Options* (or
-> disable the firewall) so the raw listener sees peers' echo requests.
->
-> This holds at the kernel level too: the macOS kernel answers echo requests
-> itself and never passes them to raw sockets. For chat that must work on macOS,
-> use relay mode, which delivers messages as echo *replies* instead — see
-> [Relay server](#relay-server).
+| Flag | What it does | Default |
+|---|---|---|
+| `--peer` | Peer IP for direct mode. | none |
+| `--relay` | Relay IP for room chat. Pass this or `--peer`, not both. | none |
+| `--name` | Your display name. | `anon` |
+| `--room` | Room to join through the relay. | `lobby` |
+| `--key` | Passphrase. Turns on AES-256-GCM. | off |
+| `--verbose` | Logs relay polls to stderr. | off |
+
+Anything over the 1000-byte payload limit is split into chunks and reassembled on the other side. If a long message fails partway, you get `✗ (partial send: N of M chunks delivered; peer may see an incomplete message)`.
+
+## Relay
+
+Direct mode is one-to-one. The relay (`cmd/relay`) gives you rooms of any size and works when clients can't reach each other directly. It needs root. Run it on a host every client can ping:
+
+```sh
+sudo relay --addr 192.0.2.1
+```
+
+Then each participant joins through it:
+
+```sh
+sudo icmpchat --relay 192.0.2.1 --name alice --room lobby
+```
+
+Clients poll the relay about once a second, and the relay hands queued messages back as echo **replies**. Replies do reach raw sockets on macOS, which is why relay mode works there and direct mode can't receive.
+
+| Flag | What it does | Default |
+|---|---|---|
+| `--addr` | The relay IP that clients pass to `--relay`. | best-effort detected |
+| `--ttl` | Drops members quiet for longer than this. | `60s` |
+| `--prune-every` | How often to drop quiet members. | `30s` |
+| `--verbose` | Logs forwarded messages and poll drains. | `false` |
 
 ## How it works
 
-### Sender (unprivileged)
+Every payload starts with the 4-byte magic `ICHT`, so the listener ignores ordinary pings. The listener also drops echo replies and anything not from the peer. With `--key`, everything after the 5-byte `magic` + `ver` header is sealed, so a receiver can still filter without the key. The byte layout, the relay header and its flags are in [docs/protocol.md](docs/protocol.md).
 
-Sends over a `SOCK_DGRAM` ICMP socket (`"udp4"`). The kernel rewrites the ICMP
-identifier, so routing relies on the payload, never on the ID. After sending, the
-sender waits up to 2 s for the matching echo reply (matched by payload bytes, not
-ID) and prints `✓` on delivery or `✗ (no reply)` on timeout, retrying once. The
-kernel's auto-reply doubles as a free delivery acknowledgment — replies are never
-crafted by hand.
+## Documentation
 
-### Listener (root)
+| Page | What's there |
+|---|---|
+| [Protocol](docs/protocol.md) | Sender and listener sockets, the wire format, encryption, the relay's pull model and wire flags. |
+| [Testing](docs/testing.md) | Every test level, what needs root, and the two-host script. |
+| [Contributing](CONTRIBUTING.md) | Branches, CI and the project layout. |
 
-Listens on a raw IPv4 ICMP socket (`"ip4:icmp"`) and filters echo requests
-(type 8) whose payload starts with the 4-byte magic `ICHT` and whose source is
-the peer. The IP header (delivered first on both macOS and Linux) is stripped
-using the IHL field. Echo replies (type 0) and non-peer packets are ignored.
-
-### Wire format (ICMP payload, big-endian)
-
-```
-magic[4]="ICHT" ver[1] flags[1] msgid[4] chunkIdx[1] chunkCnt[1] nameLen[1] name text
-```
-
-With `--key`, everything after the 5-byte header (`magic` + `ver`) is sealed with
-AES-256-GCM and a random 12-byte nonce is prepended; the visible header lets the
-listener filter without the key.
-
-Max payload is 1000 bytes, so a message is never sent as a single oversized
-packet. Longer text is split into chunks sharing a random `msgid` and reassembled
-by the receiver in `chunkIdx` order.
-
-### Encryption
-
-`--key` derives a 32-byte key via `SHA-256(passphrase)` and seals the payload with
-AES-256-GCM (stdlib `crypto/cipher`). Ciphertext that fails authentication (wrong
-key or tampering) is dropped silently.
-
-## Relay server
-
-Direct mode pairs two hosts one-to-one. The **relay** decouples peers so any
-number of clients can chat together in a room, and lets clients talk even when
-they cannot reach each other directly (firewalls, NAT, or asymmetric
-reachability). It is a separate binary built from `cmd/relay`.
-
-The relay needs a raw ICMP socket (root). Run it on a host both clients can ping:
+## Development
 
 ```sh
-sudo relay --addr 192.168.1.10
+gofmt -l .
+go vet ./...
+go test ./... -count=1
 ```
 
-Clients then join a room through that relay:
+The e2e tests build the real binary and send to `127.0.0.1`. They skip on Linux without root. The full receive path needs two hosts and `sudo scripts/e2e_remote.sh`; see [Testing](docs/testing.md).
 
-```sh
-# on each participant
-sudo icmpchat --relay 192.168.1.10 --name alice --room lobby
-```
+## Security
 
-How it works:
+This is a toy transport, not a secure one.
 
-- Each client's outgoing chunk is wrapped in a small **visible relay header**
-  (`magic ver flags roomLen room`) in front of the (possibly encrypted) chat
-  payload. The header stays unencrypted so the relay can route without the key.
-- The relay parses the header, records the sender as a member of the room, and
-  queues the chat payload for every *other* member of that room.
-- Members **pull** their messages by polling the relay. Each client sends a
-  short poll — an ICMP echo request carrying only the relay header with the
-  poll flag set — about once a second. A poll is both a keepalive (it refreshes
-  the member's TTL) and a request to drain anything queued since the last poll.
-- The relay drains each member's queue and delivers the messages as ICMP echo
-  **replies** (type 0), re-wrapped in a relay header with the deliver flag set
-  and copied from the poll's ICMP id/seq. Queued messages go out oldest first,
-  and each is delivered exactly once. The relay never crafts echo requests; it
-  only answers a poll with a queued message.
-- Members that go quiet are pruned after a configurable TTL.
+- `--key` hides and authenticates the message content only. Anyone on the path still sees ICMP echo traffic between your hosts, plus the 5-byte header and, in relay mode, the room name.
+- The key is `SHA-256(passphrase)` with no salt and no stretching. Use a long random passphrase.
+- The listener and the relay run as root.
 
-This pull model is what makes relay mode work on macOS. The kernel answers echo
-requests itself and never passes them to raw sockets, so a macOS client cannot
-receive relay chat as echo requests. Echo **replies** (type 0), however, do reach
-macOS raw sockets, so the relay delivers queued messages that way. Direct
-`--peer` mode is unchanged and keeps the same macOS receive limitation.
+---
 
-Flags:
-
-| Flag          | Description                                          | Default         |
-| ------------- | ---------------------------------------------------- | --------------- |
-| `--addr`      | Relay's LAN IP that clients should use (`--relay`).  | auto-detected   |
-| `--ttl`       | Drop members inactive for longer than this.          | `60s`           |
-| `--prune-every` | How often to prune inactive members.               | `30s`           |
-| `--verbose`   | Log received packets, poll drains, and deliveries.   | `false`         |
-
-Relay wire flags (the `flags` byte after `ver`):
-
-| Flag     | Direction        | Meaning                                            |
-| -------- | ---------------- | -------------------------------------------------- |
-| `0x01`   | message          | payload carries a visible relay routing header     |
-| `0x02`   | client → relay   | echo request is a poll (relay header only)         |
-| `0x04`   | relay → client   | echo reply carries a queued message                |
-
-The client and relay share the wire-format, chunking, crypto, and socket logic
-under `internal/icmpchat`; the relay entrypoint is `cmd/relay`.
-
-## Testing
-
-```sh
-go test ./...
-```
-
-Tests come in four levels:
-
-| Level             | File(s)                                         | What it covers                                              | Needs root? |
-| ----------------- | ----------------------------------------------- | ----------------------------------------------------------- | ----------- |
-| Unit              | `proto_test.go`                                 | encode/decode, 5000-byte chunking, bad magic, truncation, wrong key | no |
-| Integration       | `integration_test.go`                           | full wire pipeline: encode → chunk → reassemble → decode, multi-message | no |
-| Socket pipeline   | `icmpio_test.go`, `listener_test.go`            | IP-header stripping, source filtering, echo-reply ignoring  | no (synthetic packets) |
-| Relay routing     | `cmd/relay/relay_test.go`                       | room membership, target selection, stale-member pruning      | no |
-| End-to-end        | `e2e_test.go`                                   | builds the real binary and runs it against 127.0.0.1        | sender only (unprivileged on macOS) |
-| Remote two-host   | `scripts/e2e_remote.sh`                         | real chat between two machines over the LAN                 | **yes** |
-
-The unit, integration, and socket-pipeline tests run anywhere. The e2e tests
-build and run the actual binary and skip gracefully where an ICMP sender socket
-cannot be opened (non-root on Linux). The remote two-host script exercises the
-full receive path and must be run with sudo on each host.
-
-### Remote end-to-end
-
-The full receive path needs a raw socket (root). Run the driver on host A:
-
-```sh
-# Single-host self-delivery (validates the receive path on one host):
-sudo scripts/e2e_remote.sh <this-host-lan-ip> <name>
-
-# Two-host (run on A; drives B over ssh):
-sudo scripts/e2e_remote.sh <host-b-ip> <name-a> <user@host-b>
-```
-
-It exchanges a cleartext message, a long chunked message, and an encrypted
-message in both directions and verifies each delivery.
-
-## Project layout
-
-The client is a thin `package main` over a shared protocol package:
-
-```
-icmpchat/
-├── main.go                 # client CLI (entrypoint)
-├── cmd/
-│   └── relay/              # relay server (one-to-many chat)
-│       ├── main.go
-│       └── relay_test.go
-├── internal/
-│   └── icmpchat/           # shared client+relay protocol/socket package
-│       ├── proto.go        # wire format, chunking, crypto, reassembly
-│       ├── icmpio.go       # sender + listener socket helpers
-│       ├── relay_proto_test.go
-│       └── (moved tests: proto, icmpio, listener, sender, integration)
-├── e2e_test.go             # builds + runs the real binary
-├── scripts/
-│   └── e2e_remote.sh       # two-host LAN test (needs sudo)
-├── .github/workflows/ci.yml
-├── go.mod
-└── README.md
-```
-
-The client and the relay share the wire-format, chunking, crypto, and socket
-logic under `internal/icmpchat`; the client entrypoint stays at `main.go` and
-the relay server lives at `cmd/relay`.
-
-## Branch strategy & CI
-
-- **`dev`** is the working branch; **`main`** is the stable, shipped line.
-- CI runs on every push/PR to `dev` and `main`, on both macOS and Linux:
-  - `gofmt` formatting check
-  - `go vet`
-  - `go build ./...` and `go test ./...` across both platforms
-  - the e2e suite
-
-Work is merged to `dev`, validated, then merged to `main`.
-
-## Known risks
-
-- **Firewalls/NAT/cloud:** many networks rate-limit or drop ICMP, so this works
-  only where the peer is reachable and ICMP is permitted — not everywhere TCP
-  or UDP would.
-- **Root required to receive:** the receiving side must run `sudo`, as noted
-  above.
-- **Not a secure or reliable transport by default:** the optional AES-GCM layer
-  adds confidentiality and integrity of payload content only, not
-  traffic-analysis resistance. ICMP echo traffic to a given host is still
-  visible on the wire as ICMP. This is a toy/educational transport.
-
-## Roadmap
-
-- [x] Unprivileged sender + root listener, chunking, optional encryption
-- [x] Unit, integration, e2e, and remote two-host tests
-- [x] GitHub repo with `dev`/`main` branches and CI
-- [x] Split client/relay into `cmd/` + `internal/` packages
-- [x] Relay server for one-to-many chat and peer decoupling (built + unit-tested)
-- [x] Poll-based relay delivery so relay chat works on macOS (pull model; delivered as echo replies)
-- [x] Full multi-host e2e run with the relay (validated over the LAN: relay on Linux, with a macOS client and a Linux client chatting both directions)
+<sub>Part of <a href="https://github.com/Crank-Git#other-packets"><b>Other packets</b></a>.
+Siblings: <a href="https://github.com/Crank-Git/sourceknock">sourceknock</a> ·
+Built by <a href="https://github.com/Crank-Git">Crank</a></sub>
