@@ -9,6 +9,7 @@
   <a href="https://github.com/Crank-Git/icmpchat/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Crank-Git/icmpchat?style=flat-square&labelColor=30363d&color=7ee787"></a>
   <img alt="Go version" src="https://img.shields.io/github/go-mod/go-version/Crank-Git/icmpchat?style=flat-square&label=go&labelColor=30363d&color=7ee787">
   <img alt="Platform: Linux and macOS" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS-7ee787?style=flat-square&labelColor=30363d">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-7ee787?style=flat-square&labelColor=30363d"></a>
 </p>
 
 <p align="center">
@@ -160,6 +161,10 @@ This is a toy transport, not a secure one.
 - `--key` hides and authenticates the message content only. Anyone on the path still sees ICMP echo traffic between your hosts, plus the 5-byte header and, in relay mode, the room name.
 - The key is `SHA-256(passphrase)` with no salt and no stretching. Use a long random passphrase.
 - The listener and the relay run as root.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 ---
 

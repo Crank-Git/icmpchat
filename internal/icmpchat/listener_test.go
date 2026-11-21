@@ -196,7 +196,7 @@ func TestParseEchoRequestRejectsEchoReplies(t *testing.T) {
 // (l.relay) should be accepted in this mode, and only as an echo reply (type 0)
 // carrying the deliver bit.
 func TestHandleRelayDeliverAccepted(t *testing.T) {
-	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
+	l := &Listener{peer: "", relay: "192.0.2.1", key: nil, reasm: newReassembler()}
 	chat := &Message{Name: "mac", Text: "hb2", MsgID: 3, ChunkIdx: 0, ChunkCnt: 1}
 	chatPayload, _ := Encode(chat, nil)
 	header, _ := BuildDeliverHeader("demo")
@@ -205,7 +205,7 @@ func TestHandleRelayDeliverAccepted(t *testing.T) {
 	wire = append(wire, chatPayload...)
 	// Deliveries arrive as echo replies (type 0), not echo requests.
 	pkt := echoReplyPacket(wire)
-	name, text, complete, dropped, err := l.handlePacket(net.ParseIP("192.168.1.215"), pkt)
+	name, text, complete, dropped, err := l.handlePacket(net.ParseIP("192.0.2.1"), pkt)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestHandleRelayDeliverAccepted(t *testing.T) {
 // TestHandleRelayWrongSourceDropped ensures a relay-mode listener still drops
 // deliveries that do not arrive from the relay.
 func TestHandleRelayWrongSourceDropped(t *testing.T) {
-	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
+	l := &Listener{peer: "", relay: "192.0.2.1", key: nil, reasm: newReassembler()}
 	chat := &Message{Name: "eve", Text: "spoof", MsgID: 4, ChunkIdx: 0, ChunkCnt: 1}
 	chatPayload, _ := Encode(chat, nil)
 	header, _ := BuildDeliverHeader("demo")
@@ -239,9 +239,9 @@ func TestHandleRelayWrongSourceDropped(t *testing.T) {
 // our polls and messages (and the kernel's auto-ack) are replies from the relay
 // with no deliver bit, so accepting them would inject garbage into reassembly.
 func TestHandleRelayReplyWithoutDeliverFlagDropped(t *testing.T) {
-	l := &Listener{peer: "", relay: "192.168.1.215", key: nil, reasm: newReassembler()}
+	l := &Listener{peer: "", relay: "192.0.2.1", key: nil, reasm: newReassembler()}
 	pkt := echoReplyPacket([]byte("ICHT\x01\x00\x00\x00\x00\x00\x00\x00x"))
-	_, _, complete, dropped, _ := l.handlePacket(net.ParseIP("192.168.1.215"), pkt)
+	_, _, complete, dropped, _ := l.handlePacket(net.ParseIP("192.0.2.1"), pkt)
 	if !dropped || complete {
 		t.Fatalf("reply without deliver bit should be dropped")
 	}
